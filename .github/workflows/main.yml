@@ -114,7 +114,7 @@ jobs:
           echo "hev OK ($(du -h "$LIBS/hev-socks5-tunnel.aar" | cut -f1))"
 
           ########################################
-          # 2) Xray-core (VLESS / VMess / Trojan / SS / SOCKS / WireGuard)
+          # 2) Xray-core
           ########################################
           echo "=== Xray-core ==="
           get_xray() {
@@ -172,12 +172,13 @@ jobs:
           echo "DNSTT OK"
 
           ########################################
-          # 4) Hysteria v1 (UDP / ZiVPN style)
+          # 4) Hysteria v1 (UDP / ZiVPN) — URL CORRIGÉE
           ########################################
           echo "=== Hysteria v1 ==="
-          dl "https://github.com/apernet/hysteria/releases/download/app/v${HYSTERIA_VERSION}/hysteria-linux-arm64" \
+          # IMPORTANT : tag = v1.3.5  (PAS app/v1.3.5)
+          dl "https://github.com/apernet/hysteria/releases/download/v${HYSTERIA_VERSION}/hysteria-linux-arm64" \
              "$JNI/arm64-v8a/libhysteria.so"
-          dl "https://github.com/apernet/hysteria/releases/download/app/v${HYSTERIA_VERSION}/hysteria-linux-amd64" \
+          dl "https://github.com/apernet/hysteria/releases/download/v${HYSTERIA_VERSION}/hysteria-linux-amd64" \
              "$JNI/x86_64/libhysteria.so"
           chmod 755 "$JNI/arm64-v8a/libhysteria.so" "$JNI/x86_64/libhysteria.so"
           echo "Hysteria OK"
