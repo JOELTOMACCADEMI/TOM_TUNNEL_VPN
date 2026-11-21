@@ -19,12 +19,13 @@ env:
   GRADLE_VERSION: "8.10.2"
   XRAY_VERSION: "v26.10.21"
   HEV_VERSION: "2.19.1"
+  HYSTERIA_VERSION: "1.3.5"
 
 jobs:
   build:
     name: Build debug APK
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 50
     env:
       GH_TOKEN: ${{ github.token }}
 
@@ -36,7 +37,9 @@ jobs:
         shell: bash
         run: |
           set -eu
-          mkdir -p app/libs app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/x86_64
+          mkdir -p app/libs \
+                   app/src/main/jniLibs/arm64-v8a \
+                   app/src/main/jniLibs/x86_64
           ls -la
 
       - name: Set up JDK 17
@@ -51,8 +54,11 @@ jobs:
           set -eu
           SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKM" --licenses >/dev/null || true
-          "$SDKM" "platform-tools" "platforms;android-34" "platforms;android-35" \
-                  "build-tools;34.0.0" "build-tools;35.0.0"
+          "$SDKM" "platform-tools" \
+                  "platforms;android-34" \
+                  "platforms;android-35" \
+                  "build-tools;34.0.0" \
+                  "build-tools;35.0.0"
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
 
@@ -62,7 +68,7 @@ jobs:
           go-version: "1.24"
           cache: false
 
-      - name: Bootstrap native engines (Xray, hev-socks5-tunnel, DNSTT, Hysteria)
+      - name: Bootstrap native engines (Xray + hev + DNSTT + Hysteria)
         shell: bash
         run: |
           set -euo pipefail
@@ -75,47 +81,62 @@ jobs:
           dl() {
             local url="$1" out="$2" i
             for i in 1 2 3 4 5; do
-              if curl -fL --connect-timeout 20 --max-time 300 -o "$out" "$url"; then
+              echo "→ Téléchargement ($i/5) : $url"
+              if curl -fL --connect-timeout 25 --max-time 360 -o "$out" "$url"; then
                 [ -s "$out" ] && return 0
               fi
-              echo "Échec téléchargement ($i/5) : $url" >&2
-              sleep 4
+              echo "Échec ($i/5)" >&2
+              sleep 5
             done
+            echo "ÉCHEC définitif : $url" >&2
             return 1
           }
+
           latest_tag() {
             curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
               "https://api.github.com/repos/$1/releases/latest" \
-              | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
+              | grep -m1 '"tag_name"' \
+              | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
           }
 
-          # 1) hev-socks5-tunnel
+          ########################################
+          # 1) hev-socks5-tunnel (TUN)
+          ########################################
+          echo "=== hev-socks5-tunnel ==="
           HEV_URL="https://github.com/heiher/hev-socks5-tunnel/releases/download/${HEV_VERSION}/hev-socks5-tunnel.aar"
           if ! dl "$HEV_URL" "$LIBS/hev-socks5-tunnel.aar"; then
             T="$(latest_tag heiher/hev-socks5-tunnel)"
-            echo "hev : repli sur $T"
+            echo "Repli hev → $T"
             dl "https://github.com/heiher/hev-socks5-tunnel/releases/download/${T}/hev-socks5-tunnel.aar" \
                "$LIBS/hev-socks5-tunnel.aar"
           fi
           unzip -tq "$LIBS/hev-socks5-tunnel.aar" >/dev/null
+          echo "hev OK ($(du -h "$LIBS/hev-socks5-tunnel.aar" | cut -f1))"
 
-          # 2) Xray
+          ########################################
+          # 2) Xray-core (VLESS / VMess / Trojan / SS / SOCKS / WireGuard)
+          ########################################
+          echo "=== Xray-core ==="
           get_xray() {
             local asset="$1" abi="$2" ver="$XRAY_VERSION"
             local base="https://github.com/XTLS/Xray-core/releases/download"
             if ! dl "$base/$ver/$asset" "$TMP/$asset"; then
               ver="$(latest_tag XTLS/Xray-core)"
-              echo "Xray : repli sur $ver"
+              echo "Repli Xray → $ver"
               dl "$base/$ver/$asset" "$TMP/$asset"
             fi
             unzip -tq "$TMP/$asset" >/dev/null
             unzip -p "$TMP/$asset" xray > "$JNI/$abi/libxray.so"
             chmod 755 "$JNI/$abi/libxray.so"
+            echo "Xray $abi → $(du -h "$JNI/$abi/libxray.so" | cut -f1)"
           }
           get_xray "Xray-android-arm64-v8a.zip" "arm64-v8a"
           get_xray "Xray-android-amd64.zip"     "x86_64"
 
-          # 3) DNSTT
+          ########################################
+          # 3) DNSTT (SlowDNS)
+          ########################################
+          echo "=== DNSTT ==="
           rm -rf "$TMP/dnstt_xyz_app"
           git clone --depth 1 https://github.com/dnstt-xyz/dnstt_xyz_app.git "$TMP/dnstt_xyz_app"
 
@@ -132,41 +153,55 @@ jobs:
           else
             REL="./${CLIENT_DIR#"$MOD_DIR"/}"
           fi
-          echo "Module Go : ${MOD_DIR} (paquet ${REL})"
+          echo "Module Go : $MOD_DIR (paquet $REL)"
 
           cd "$MOD_DIR"
 
-          echo "Build dnstt-client arm64 -> $JNI/arm64-v8a/libdnstt.so"
+          echo "Build dnstt-client arm64..."
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
             go build -trimpath -ldflags="-s -w" -o "$JNI/arm64-v8a/libdnstt.so" "$REL"
           chmod 755 "$JNI/arm64-v8a/libdnstt.so"
-          test -s "$JNI/arm64-v8a/libdnstt.so" || { echo "Échec build arm64" >&2; exit 1; }
+          test -s "$JNI/arm64-v8a/libdnstt.so" || { echo "Échec DNSTT arm64" >&2; exit 1; }
 
-          echo "Build dnstt-client amd64 -> $JNI/x86_64/libdnstt.so"
+          echo "Build dnstt-client amd64..."
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
             go build -trimpath -ldflags="-s -w" -o "$JNI/x86_64/libdnstt.so" "$REL"
           chmod 755 "$JNI/x86_64/libdnstt.so"
-          test -s "$JNI/x86_64/libdnstt.so" || { echo "Échec build amd64" >&2; exit 1; }
+          test -s "$JNI/x86_64/libdnstt.so" || { echo "Échec DNSTT amd64" >&2; exit 1; }
 
-          # 4) Hysteria v1 client utilisé par le moteur UDP ZiVPN-style
-          HYSTERIA_VERSION="1.3.5"
+          echo "DNSTT OK"
+
+          ########################################
+          # 4) Hysteria v1 (UDP / ZiVPN style)
+          ########################################
+          echo "=== Hysteria v1 ==="
           dl "https://github.com/apernet/hysteria/releases/download/app/v${HYSTERIA_VERSION}/hysteria-linux-arm64" \
              "$JNI/arm64-v8a/libhysteria.so"
           dl "https://github.com/apernet/hysteria/releases/download/app/v${HYSTERIA_VERSION}/hysteria-linux-amd64" \
              "$JNI/x86_64/libhysteria.so"
           chmod 755 "$JNI/arm64-v8a/libhysteria.so" "$JNI/x86_64/libhysteria.so"
+          echo "Hysteria OK"
 
           cd "$GITHUB_WORKSPACE"
 
-          echo "=== Vérification des binaires ==="
-          for f in "$JNI"/arm64-v8a/libxray.so "$JNI"/arm64-v8a/libdnstt.so \
-                   "$JNI"/x86_64/libxray.so   "$JNI"/x86_64/libdnstt.so \
-                   "$JNI"/arm64-v8a/libhysteria.so "$JNI"/x86_64/libhysteria.so; do
+          ########################################
+          # Vérification finale
+          ########################################
+          echo "=== Vérification des binaires natifs ==="
+          for f in \
+            "$JNI/arm64-v8a/libxray.so" \
+            "$JNI/arm64-v8a/libdnstt.so" \
+            "$JNI/arm64-v8a/libhysteria.so" \
+            "$JNI/x86_64/libxray.so" \
+            "$JNI/x86_64/libdnstt.so" \
+            "$JNI/x86_64/libhysteria.so"
+          do
             [ -s "$f" ] || { echo "MANQUANT : $f" >&2; exit 1; }
-            echo "$(du -h "$f" | cut -f1)  $f"
+            echo "  $(du -h "$f" | cut -f1)  $f"
             file "$f" || true
           done
           ls -la "$LIBS"
+          echo "Tous les moteurs sont prêts."
 
       - name: Auto-fix Gradle config
         shell: bash
@@ -179,6 +214,8 @@ jobs:
             echo 'android.useAndroidX=true' >> gradle.properties
           grep -q '^kotlin.code.style' gradle.properties || \
             echo 'kotlin.code.style=official' >> gradle.properties
+          grep -q '^android.nonTransitiveRClass' gradle.properties || \
+            echo 'android.nonTransitiveRClass=true' >> gradle.properties
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -207,9 +244,9 @@ jobs:
           [ -f "$LOG" ] || exit 0
           echo "## Erreurs Gradle" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          grep -A 20 -E 'What went wrong|FAILURE:|error:|^e: |AAPT|Unresolved reference|Could not resolve' "$LOG" | head -80 >> "$GITHUB_STEP_SUMMARY" || true
+          grep -A 25 -E 'What went wrong|FAILURE:|error:|^e: |AAPT|Unresolved reference|Could not resolve' "$LOG" \
+            | head -100 >> "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          # Affiche aussi dans les logs
           grep -A 15 -E 'What went wrong|FAILURE:|error:|^e: ' "$LOG" | head -60 || true
 
       - name: Upload APK
