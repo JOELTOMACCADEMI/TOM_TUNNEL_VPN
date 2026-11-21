@@ -68,6 +68,63 @@ jobs:
           }
           EOF
 
+          # Correctif « AAPT: resource mipmap/ic_launcher / xml/file_paths not found » :
+          # on recrée les ressources Android si elles manquent dans le dépôt.
+          RES="app/src/main/res"
+          mkdir -p "$RES/xml" "$RES/values" "$RES/mipmap-xxxhdpi"
+
+          if [ ! -s "$RES/xml/file_paths.xml" ]; then
+            cat > "$RES/xml/file_paths.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths>
+              <cache-path name="cache" path="." />
+              <files-path name="files" path="." />
+              <external-path name="external" path="." />
+              <external-files-path name="external_files" path="." />
+              <external-cache-path name="external_cache" path="." />
+          </paths>
+          EOF
+            echo "file_paths.xml recréé"
+          fi
+
+          if [ ! -s "$RES/values/strings.xml" ]; then
+            cat > "$RES/values/strings.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">TOM_TUNNEL</string>
+              <string name="api_base">https://api.tomtunnel.com/v1</string>
+          </resources>
+          EOF
+            echo "strings.xml recréé"
+          fi
+
+          if [ ! -s "$RES/mipmap-xxxhdpi/ic_launcher.png" ]; then
+            python3 - "$RES/mipmap-xxxhdpi/ic_launcher.png" <<'PYEOF'
+          import sys, zlib, struct
+          N = 192
+          rows = []
+          for y in range(N):
+              row = bytearray([0])
+              for x in range(N):
+                  t = (x + y) / (2 * N)
+                  r = int(0 + 255 * t); g = int(168 - 61 * t); b = int(255 - 229 * t)
+                  dx, dy = x - N / 2, y - N / 2
+                  d = (dx * dx + dy * dy) ** 0.5
+                  if 44 < d < 58:
+                      r, g, b = 255, 255, 255
+                  row += bytes((r, g, b, 255))
+              rows.append(bytes(row))
+          raw = b"".join(rows)
+          def chunk(tag, data):
+              c = struct.pack(">I", len(data)) + tag + data
+              return c + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+          png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", N, N, 8, 6, 0, 0, 0)) \
+                + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
+          open(sys.argv[1], "wb").write(png)
+          PYEOF
+            echo "ic_launcher.png recréé"
+          fi
+
           echo "=== Structure du projet ==="
           ls -la
           echo "--- settings.gradle.kts ---"; cat settings.gradle.kts
