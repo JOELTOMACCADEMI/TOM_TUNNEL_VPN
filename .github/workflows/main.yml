@@ -237,7 +237,7 @@ jobs:
             GRADLE="gradle"
           fi
           "$GRADLE" --version
-          "$GRADLE" --no-daemon --stacktrace --console=plain :app:assembleDebug \
+          "$GRADLE" --no-daemon --console=plain :app:assembleDebug \
             2>&1 | tee "$RUNNER_TEMP/gradle.log"
 
       - name: Résumé des erreurs
@@ -251,7 +251,10 @@ jobs:
           grep -A 25 -E 'What went wrong|FAILURE:|error:|^e: |AAPT|Unresolved reference|Could not resolve' "$LOG" \
             | head -100 >> "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          grep -A 15 -E 'What went wrong|FAILURE:|error:|^e: ' "$LOG" | head -60 || true
+          echo "================ CAUSE DE L'ERREUR ================"
+          grep -A 20 -E 'What went wrong' "$LOG" | head -40 || true
+          grep -E '^e: |error:' "$LOG" | head -30 || true
+          echo "==================================================="
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
