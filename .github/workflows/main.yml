@@ -112,6 +112,9 @@ jobs:
           fi
           unzip -tq "$LIBS/hev-socks5-tunnel.aar" >/dev/null
           echo "hev OK ($(du -h "$LIBS/hev-socks5-tunnel.aar" | cut -f1))"
+          # Diagnostic : classes JNI exposées par l'AAR (aide si "Unresolved reference")
+          unzip -p "$LIBS/hev-socks5-tunnel.aar" classes.jar > "$TMP/hev-classes.jar" 2>/dev/null || true
+          unzip -l "$TMP/hev-classes.jar" 2>/dev/null | grep -i tproxy || true
 
           ########################################
           # 2) Xray-core
