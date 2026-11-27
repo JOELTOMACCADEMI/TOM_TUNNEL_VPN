@@ -1,101 +1,64 @@
 package com.tomtunnel.app.engine
 
 import android.content.Context
-import android.os.Build
-import com.jcraft.jsch.JSchException
+import com.jcraft.jsch.Proxy
+import com.jcraft.jsch.Session
 import org.json.JSONObject
-import java.io.File
-import java.net.InetSocketAddress
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.Socket
 
-/**
- * SSH over DNSTT/SlowDNS.
- *
- *  dnstt-client (UDP DNS vers le résolveur) --> TCP local 127.0.0.1:LOCAL --> JSch (SSH) --> SOCKS5 local 127.0.0.1:SOCKS_PORT
- *
- * DNSTT expose un simple forward TCP (pas un proxy SOCKS) : on fait donc la session SSH par-dessus,
- * puis on ouvre un petit serveur SOCKS5 qui crée des canaux "direct-tcpip" dans cette session.
- */
-class SlowDnsEngine : SshSocksEngine() {
+/** SSH sur DNSTT/SlowDNS. DNSTT expose un forward TCP local brut (pas un proxy SOCKS). */
+class SlowDnsEngine : Engine {
     private var dns: Process? = null
-
-    override fun openTransport(): Socket =
-        Socket().also { it.connect(InetSocketAddress("127.0.0.1", LOCAL), 15000) }
+    private var ssh: Session? = null
+    private var socks: SshSocksServer? = null
 
     override fun start(ctx: Context, s: JSONObject) {
-        val abi = if (Build.SUPPORTED_ABIS.firstOrNull() == "x86_64") "x86_64" else "arm64-v8a"
-        val bin = EngineAssets.materialize(ctx, "dnstt", abi, "dnstt-client")
-
-        // ---- Paramètres saisis dans l'application (tous nettoyés) ----
-        val resolverRaw = s.optString("resolver", "").trim().ifEmpty { "8.8.8.8" }
-        val resolverPort = s.optString("dnsPort", "53").trim().toIntOrNull()?.coerceIn(1, 65535) ?: 53
-        val dnsServer = when {
-            resolverRaw.startsWith("[") -> resolverRaw                                  // [ipv6]:port
-            resolverRaw.count { it == ':' } == 1 -> resolverRaw                         // ip:port
-            resolverRaw.contains(":") -> "[$resolverRaw]:$resolverPort"                 // ipv6 nu
-            else -> "$resolverRaw:$resolverPort"
-        }
-        val ns = s.optString("ns").trim().trimEnd('.')
-        val pub = s.optString("pubkey").filter { !it.isWhitespace() }
-        require(ns.isNotEmpty()) { "Nameserver DNSTT (NS) manquant" }
+        val bin = EngineAssets.materialize(ctx, "dnstt")
+        val resolver = s.optString("resolver", "1.1.1.1").trim().ifEmpty { "1.1.1.1" }
+        val dnsPort = s.optInt("dnsPort", 53).coerceIn(1, 65535)
+        val dnsServer = if (resolver.contains(":")) resolver else "$resolver:$dnsPort"
+        val ns = s.optString("ns").trim()
+        val pub = s.optString("pubkey").trim()
+        require(ns.isNotEmpty()) { "Nameserver DNSTT manquant" }
         require(pub.isNotEmpty()) { "Clé publique DNSTT manquante" }
-        require(Regex("^[0-9a-fA-F]{64}$").matches(pub)) {
-            "Clé publique invalide : elle doit contenir exactement 64 caractères hexadécimaux (0-9, a-f). " +
-            "Vous avez ${pub.length} caractères."
-        }
-        val sshUser = s.optString("user").trim()
-        val sshPass = s.optString("pass")
-        val sshPort = s.optString("sshPort", "22").trim().toIntOrNull() ?: 22
-        val sshHost = s.optString("host").trim().ifEmpty { "127.0.0.1" }
-        require(sshUser.isNotEmpty()) { "Utilisateur SSH manquant" }
 
-        // ---- 1) DNSTT ----
         val log = ctx.getFileStreamPath("dnstt.log").apply { writeText("") }
-        val p = ProcessBuilder(bin.path, "-udp", dnsServer, "-pubkey", pub, ns, "127.0.0.1:$LOCAL")
-            .directory(ctx.filesDir)
-            .redirectErrorStream(true).start()
-        dns = p
-        p.drainTo(log)
-
-        val ready = waitForPort("127.0.0.1", LOCAL, 15000) { p.alive() }
-        check(ready) {
-            if (!p.alive()) "DNSTT s'est arrêté : ${tail(log, 700).ifEmpty { "aucun message (binaire incompatible ?)" }}"
-            else "DNSTT n'a pas ouvert le port local $LOCAL en 15 s. ${tail(log, 700)}"
+        dns = ProcessBuilder(bin.path, "-udp", dnsServer, "-pubkey", pub, ns, "127.0.0.1:$LOCAL")
+            .redirectErrorStream(true).start().also { it.drainTo(log) }
+        check(waitForPort("127.0.0.1", LOCAL, 12000)) {
+            "DNSTT n'a pas ouvert le tunnel TCP $LOCAL. ${tail(log, 2200)}"
         }
 
-        // ---- 2) SSH par-dessus DNSTT (tunnel DNS lent : plusieurs essais, longs délais) ----
-        connectSsh(sshUser, sshHost, sshPort, sshPass, SSH_ATTEMPTS, { p.alive() }) { explainSshError(it, log) }
-
-        // ---- 3) SOCKS5 local ----
-        startSocks()
-    }
-
-    private fun explainSshError(e: Throwable, log: File): String {
-        val m = e.message.orEmpty()
-        val tl = tail(log, 400)
-        val base = when {
-            m.contains("Auth fail", true) || m.contains("auth cancel", true) ->
-                "Identifiant ou mot de passe SSH incorrect (le tunnel DNS fonctionne, c'est le compte SSH qui est refusé)."
-            m.contains("timeout", true) || m.contains("timed out", true) ->
-                "Délai dépassé : le serveur SlowDNS ne répond pas. Vérifiez le NS, la clé publique et essayez un autre résolveur DNS."
-            m.contains("Connection reset", true) || m.contains("EOF", true) || m.contains("socket is not established", true) || m.contains("Connection closed", true) ->
-                "Le tunnel DNSTT a été coupé pendant la connexion SSH. Vérifiez NS / clé publique, le port SSH et le résolveur."
-            e is JSchException -> "Erreur SSH : $m"
-            else -> m.ifEmpty { e.javaClass.simpleName }
+        fun newProxy(): Proxy = object : Proxy {
+            private var socket: Socket? = null
+            private var input: InputStream? = null
+            private var output: OutputStream? = null
+            override fun connect(sf: com.jcraft.jsch.SocketFactory?, host: String, port: Int, timeout: Int) {
+                socket = if (sf != null) sf.createSocket("127.0.0.1", LOCAL) else Socket("127.0.0.1", LOCAL)
+                socket!!.soTimeout = timeout.coerceAtLeast(1000)
+                input = socket!!.getInputStream(); output = socket!!.getOutputStream()
+            }
+            override fun getInputStream(): InputStream = input ?: error("DNSTT proxy input indisponible")
+            override fun getOutputStream(): OutputStream = output ?: error("DNSTT proxy output indisponible")
+            override fun getSocket(): Socket = socket ?: error("DNSTT proxy socket indisponible")
+            override fun close() { try { socket?.close() } catch (_: Throwable) {} }
         }
-        return if (tl.isNotEmpty()) "$base\nDNSTT : $tl" else base
-    }
 
-    override fun isAlive(): Boolean = super.isAlive() && (dns?.alive() == true)
+        ssh = SshCommon.connect(ctx, s.optString("host"), s.optInt("sshPort", 22), s.optString("user"), s.optString("pass")) { newProxy() }
+
+        socks = SshSocksServer(ssh!!, resolver.substringBefore(":"), dnsPort).also { it.start() }
+    }
 
     override fun stop() {
-        super.stop()
+        try { socks?.stop() } catch (_: Throwable) {}
+        try { ssh?.disconnect() } catch (_: Throwable) {}
         try { dns?.destroy() } catch (_: Throwable) {}
-        dns = null
+        socks = null; ssh = null; dns = null
     }
 
-    companion object {
-        const val LOCAL = 2222
-        private const val SSH_ATTEMPTS = 3
-    }
+    override fun alive(): Boolean = ssh?.isConnected == true && dns?.isAlive == true
+
+    companion object { const val LOCAL = 2222 }
 }
