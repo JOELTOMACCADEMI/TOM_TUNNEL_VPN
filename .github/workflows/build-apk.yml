@@ -40,14 +40,12 @@ jobs:
           gradle-version: '8.7'
 
       # ============================================================
-      # Crée le script de bootstrap s'il est manquant dans le dépôt
+      # Crée le script de bootstrap (version propre, sans indentation)
       # ============================================================
       - name: Assurer la présence de scripts/bootstrap-engines.sh
         run: |
           mkdir -p scripts
-          if [ ! -f scripts/bootstrap-engines.sh ]; then
-            echo "⚠ scripts/bootstrap-engines.sh manquant → création automatique"
-            cat > scripts/bootstrap-engines.sh << 'BOOTSTRAP_EOF'
+          cat > scripts/bootstrap-engines.sh << 'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
           ROOT="\( (cd " \)(dirname "$0")/.." && pwd)"
@@ -63,8 +61,7 @@ jobs:
           need curl; need unzip; need git; need go
 
           if [ ! -s "$LIBS/hev-socks5-tunnel.aar" ]; then
-            curl -fL --retry 3 "https://github.com/heiher/hev-socks5-tunnel/releases/download/$HEV/hev-socks5-tunnel.aar" \
-              -o "$LIBS/hev-socks5-tunnel.aar"
+            curl -fL --retry 3 "https://github.com/heiher/hev-socks5-tunnel/releases/download/$HEV/hev-socks5-tunnel.aar" -o "$LIBS/hev-socks5-tunnel.aar"
           fi
           test -s "$LIBS/hev-socks5-tunnel.aar"
 
@@ -110,8 +107,7 @@ jobs:
             if [ -s "$out" ]; then echo "DNSTT $abi déjà présent"; return; fi
             local goos
             for goos in android linux; do
-              if (cd "$MOD_DIR" && GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
-                    go build -trimpath -ldflags='-s -w' -o "$out.tmp" "$PKG"); then
+              if (cd "$MOD_DIR" && GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "$out.tmp" "$PKG"); then
                 echo "DNSTT $abi compilé (GOOS=$goos)"
                 mv "$out.tmp" "$out"
                 chmod 755 "$out"
@@ -137,10 +133,11 @@ jobs:
             fi
             local goos
             for goos in android linux; do
-              if (cd "$HYST_SRC" && GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
-                    go build -trimpath -ldflags='-s -w' -o "$out.tmp" ./cmd); then
+              if (cd "$HYST_SRC" && GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "$out.tmp" ./cmd); then
                 echo "Hysteria $abi compilé (GOOS=$goos)"
-                mv "$out.tmp" "$out"; chmod 755 "$out"; test -s "$out"
+                mv "$out.tmp" "$out"
+                chmod 755 "$out"
+                test -s "$out"
                 return
               fi
               rm -f "$out.tmp"
@@ -157,14 +154,14 @@ jobs:
           printf 'Native engines:\n'
           find "$JNI" -maxdepth 2 -type f -printf '  %p (%s bytes)\n' | sort
           printf 'AAR: %s\n' "$LIBS/hev-socks5-tunnel.aar"
-          BOOTSTRAP_EOF
-          fi
-          chmod +x scripts/bootstrap-engines.sh
-          ls -l scripts/bootstrap-engines.sh
+          EOF
 
-      # ============================================================
-      # Cache + compilation des moteurs
-      # ============================================================
+          # Nettoyage des espaces de début de ligne (problème classique YAML)
+          sed -i 's/^[[:space:]]*//' scripts/bootstrap-engines.sh
+          chmod +x scripts/bootstrap-engines.sh
+          head -n 5 scripts/bootstrap-engines.sh
+          echo "--- script OK ---"
+
       - name: Cache des moteurs natifs
         id: engines
         uses: actions/cache@v4
