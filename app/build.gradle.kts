@@ -1,7 +1,4 @@
-plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-}
+plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
 
 android {
     namespace = "com.tomtunnel.app"
@@ -13,12 +10,10 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
-
-        ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
-        }
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
+    // Signature release : activée seulement si KEYSTORE_FILE est défini.
     signingConfigs {
         create("release") {
             val ks = System.getenv("KEYSTORE_FILE")
@@ -44,16 +39,8 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
-    packaging {
-        jniLibs {
-            useLegacyPackaging = true
-        }
-    }
+    kotlinOptions { jvmTarget = "17" }
+    packaging { jniLibs { useLegacyPackaging = true } }
 }
 
 dependencies {
