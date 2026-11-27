@@ -3,33 +3,25 @@ package com.tomtunnel.app.engine
 import android.content.Context
 import java.io.File
 
+/**
+ * Les binaires (xray, dnstt, hysteria) sont empaquetés comme bibliothèques natives (lib*.so)
+ * pour qu'Android les extraie dans nativeLibraryDir, seul endroit d'où on peut les exécuter.
+ */
 object EngineAssets {
-    /** Résout automatiquement le binaire natif correspondant à la famille du moteur. */
+    private val libs = mapOf(
+        "xray" to "libxray.so",
+        "dnstt" to "libdnstt.so",
+        "hysteria" to "libhysteria.so"
+    )
+
     fun materialize(ctx: Context, family: String): File {
-        val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
-        val name = when (family) {
-            "xray" -> "xray"
-            "dnstt" -> "dnstt-client"
-            "hysteria" -> "hysteria"
-            else -> error("Moteur inconnu: $family")
-        }
-        return materialize(ctx, family, abi, name)
+        val name = libs[family] ?: error("Moteur inconnu: $family")
+        val f = File(ctx.applicationInfo.nativeLibraryDir, name)
+        check(f.exists() && f.length() > 0) { "Binaire natif introuvable: ${f.absolutePath}. Lance scripts/bootstrap-engines.sh puis recompile." }
+        return f
     }
 
-    /** Les binaires sont embarqués comme libxray.so / libdnstt.so / libhysteria.so : Android les extrait dans nativeLibraryDir (exécutable). */
-    fun materialize(ctx: Context, family: String, abi: String, name: String): File {
-        val nativeName = when {
-            family == "xray" && name == "xray" -> "libxray.so"
-            family == "dnstt" && name == "dnstt-client" -> "libdnstt.so"
-            family == "hysteria" && name == "hysteria" -> "libhysteria.so"
-            else -> error("Moteur inconnu: $family/$name")
-        }
-        val nativeFile = File(ctx.applicationInfo.nativeLibraryDir, nativeName)
-        check(nativeFile.exists() && nativeFile.length() > 0) {
-            "Moteur $nativeName absent de l'APK (ABI $abi). Recompilez l'APK avec script/bootstrap-engines.sh " +
-            "(ou le workflow GitHub corrigé) puis réinstallez."
-        }
-        nativeFile.setExecutable(true, false)
-        return nativeFile
-    }
+    fun available(ctx: Context): List<String> = libs.filter { (_, n) ->
+        File(ctx.applicationInfo.nativeLibraryDir, n).let { it.exists() && it.length() > 0 }
+    }.keys.toList()
 }
