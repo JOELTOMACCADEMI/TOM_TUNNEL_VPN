@@ -2,15 +2,10 @@ name: Build TOM TUNNEL Android APK
 
 on:
   push:
-    branches:
-      - main
-      - master
-    tags:
-      - "v*"
+    branches: [main, master]
+    tags: ["v*"]
   pull_request:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -28,12 +23,13 @@ jobs:
 
     env:
       HYST_TAG: v1.3.5
-      ANDROID_NDK_VERSION: 27.2.12479018
-      ANDROID_BUILD_TOOLS: 34.0.0
+      ANDROID_API: "24"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -41,7 +37,8 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Go
+      # Go 1.24 is required by the DNSTT build.
+      - name: Set up Go 1.24 for DNSTT
         uses: actions/setup-go@v5
         with:
           go-version: "1.24.x"
@@ -50,7 +47,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Android SDK components
+      - name: Install Android SDK and NDK
         shell: bash
         run: |
           set -euo pipefail
@@ -58,11 +55,32 @@ jobs:
           sdkmanager --install \
             "platform-tools" \
             "platforms;android-34" \
-            "build-tools;${ANDROID_BUILD_TOOLS}" \
-            "ndk;${ANDROID_NDK_VERSION}"
-          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+            "build-tools;34.0.0" \
+            "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          test -d "${ANDROID_HOME}/ndk/27.2.12479018"
 
-      - name: Install Linux build dependencies
+      # IMPORTANT: bootstrap-engines.sh refuses to build Hysteria without Go 1.20.14.
+      - name: Install Go 1.20.14 for Hysteria
+        shell: bash
+        run: |
+          set -euo pipefail
+          GO_DIR="$RUNNER_TEMP/go1.20.14"
+          mkdir -p "$GO_DIR"
+          curl -fL --retry 5 --retry-all-errors \
+            https://go.dev/dl/go1.20.14.linux-amd64.tar.gz \
+            -o "$RUNNER_TEMP/go1.20.14.tar.gz"
+          tar -xzf "$RUNNER_TEMP/go1.20.14.tar.gz" \
+            -C "$GO_DIR" --strip-components=1
+          "$GO_DIR/bin/go" version
+          echo "HYST_GO=$GO_DIR/bin/go" >> "$GITHUB_ENV"
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Install Linux dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -76,18 +94,13 @@ jobs:
           set -euo pipefail
           java -version
           go version
+          "$HYST_GO" version
           test -d "$ANDROID_NDK_HOME"
           test -f settings.gradle.kts
           test -f build.gradle.kts
           test -f app/build.gradle.kts
           test -f script/bootstrap-engines.sh
           echo "Build environment ready."
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.7"
-          cache-read-only: ${{ github.event_name == 'pull_request' }}
 
       - name: Prepare native output directories
         shell: bash
@@ -124,7 +137,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gradle --no-daemon --stacktrace --info --max-workers=2 :app:assembleDebug
+          gradle --no-daemon --stacktrace --max-workers=2 \
+            :app:clean :app:assembleDebug
 
       - name: Verify APK
         shell: bash
@@ -134,7 +148,7 @@ jobs:
           test -s "$APK"
           unzip -t "$APK" >/dev/null
           ls -lh "$APK"
-          "$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}/aapt" dump badging "$APK" | head -n 10
+          "${ANDROID_HOME}/build-tools/34.0.0/aapt" dump badging "$APK" | head -n 10
 
       - name: Prepare release files
         shell: bash
@@ -167,9 +181,10 @@ jobs:
             echo "## TOM TUNNEL Android build"
             echo ""
             echo "- Java: 17"
-            echo "- Go: 1.24.x"
+            echo "- DNSTT Go: 1.24.x"
+            echo "- Hysteria Go: 1.20.14"
             echo "- Gradle: 8.7"
             echo "- Android API: 34"
-            echo "- Android NDK: ${ANDROID_NDK_VERSION}"
+            echo "- Android NDK: 27.2.12479018"
             echo "- Hysteria: ${HYST_TAG}"
           } >> "$GITHUB_STEP_SUMMARY"
