@@ -1,0 +1,107 @@
+name: Build TOM TUNNEL APK
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # nécessaire pour publier l'APK dans une Release (tag v*)
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: false
+
+      - name: Android SDK (plateforme 34)
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0'
+
+      - name: Gradle 8.7 (AGP 8.5.2 / Kotlin 1.9.24)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      # Les moteurs natifs (Xray, DNSTT, Hysteria v1, AAR hev) sont téléchargés/compilés une seule fois
+      # puis mis en cache tant que le script de bootstrap ne change pas.
+      - name: Cache des moteurs natifs
+        id: engines
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/libs
+            app/src/main/jniLibs
+          key: engines-${{ hashFiles('scripts/bootstrap-engines.sh') }}
+
+      - name: Télécharger / compiler les moteurs
+        if: steps.engines.outputs.cache-hit != 'true'
+        run: |
+          chmod +x scripts/bootstrap-engines.sh
+          ./scripts/bootstrap-engines.sh
+
+      - name: Vérifier la présence des moteurs
+        run: |
+          ls -l app/libs/*.aar
+          for abi in arm64-v8a x86_64; do
+            for lib in libxray.so libdnstt.so libhysteria.so; do
+              test -s "app/src/main/jniLibs/$abi/$lib" || { echo "Manquant : $abi/$lib"; exit 1; }
+            done
+          done
+
+      - name: Chemin du SDK
+        run: printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+
+      - name: Compiler l'APK debug
+        run: gradle --no-daemon :app:assembleDebug
+
+      # APK release signé : uniquement si les 4 secrets de signature existent (voir README).
+      - name: Compiler l'APK release signé
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/tomtunnel.jks"
+          KEYSTORE_FILE="$RUNNER_TEMP/tomtunnel.jks" gradle --no-daemon :app:assembleRelease
+
+      - name: Nommer les APK
+        id: name
+        run: |
+          VERSION="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n1)"
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/TomTunnel-$VERSION-debug.apk"
+          if ls app/build/outputs/apk/release/*.apk >/dev/null 2>&1; then
+            cp app/build/outputs/apk/release/*.apk "dist/TomTunnel-$VERSION-release.apk"
+          fi
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TomTunnel-apk
+          path: dist/*.apk
+          if-no-files-found: error
+
+      - name: Publier dans la Release (tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.apk
+          
