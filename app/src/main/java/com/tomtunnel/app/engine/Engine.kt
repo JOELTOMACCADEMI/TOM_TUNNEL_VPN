@@ -9,7 +9,7 @@ interface Engine {
     fun start(ctx: Context, s: JSONObject)
     fun stop()
     /** false si le tunnel est tombé (processus mort, session SSH fermée...). */
-    fun isAlive(): Boolean = true
+    fun alive(): Boolean = true
     companion object { const val SOCKS_PORT = 10808 }
 }
 
