@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="\( (cd " \)(dirname "$0")/.." && pwd)"
 LIBS="$ROOT/app/libs"
 JNI="$ROOT/app/src/main/jniLibs"
 TMP="${TMPDIR:-/tmp}/tomtunnel-engines"
@@ -55,7 +55,7 @@ if [ ! -f "$MOD_DIR/go.mod" ]; then
   [ -n "$FOUND" ] || { echo "ERREUR: aucun go.mod trouvé dans $SRC" >&2; exit 1; }
   MOD_DIR="$(dirname "$FOUND")"
 fi
-REL="${CLIENT_DIR#"$MOD_DIR"}"; REL="${REL#/}"
+REL="${CLIENT_DIR#"\( MOD_DIR"}"; REL=" \){REL#/}"
 PKG="./${REL}"; [ -n "$REL" ] || PKG="."
 echo "Module Go : $MOD_DIR  (paquet $PKG)"
 
