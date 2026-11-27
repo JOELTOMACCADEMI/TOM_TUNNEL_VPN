@@ -5,13 +5,30 @@ android {
     compileSdk = 34
     defaultConfig {
         applicationId = "com.tomtunnel.app"
-        minSdk = 23
+        minSdk = 24
         targetSdk = 34
-        versionCode = 13
-        versionName = "1.5.6"
+        versionCode = 1
+        versionName = "1.0.0"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
-    buildTypes { release { isMinifyEnabled = false } }
+    // Signature release : activée seulement si KEYSTORE_FILE est défini (workflow GitHub Actions).
+    signingConfigs {
+        create("release") {
+            val ks = System.getenv("KEYSTORE_FILE")
+            if (ks != null) {
+                storeFile = file(ks)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
+        }
+    }
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            if (System.getenv("KEYSTORE_FILE") != null) signingConfig = signingConfigs.getByName("release")
+        }
+    }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     packaging { jniLibs { useLegacyPackaging = true } }
