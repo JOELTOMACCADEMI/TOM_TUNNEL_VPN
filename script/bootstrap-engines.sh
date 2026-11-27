@@ -3,10 +3,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIBS="$ROOT/app/libs"
 JNI="$ROOT/app/src/main/jniLibs"
-TMP="${TMPDIR:-/tmp}/TOM-TUNNEL-engines"
+TMP="${TMPDIR:-/tmp}/tomtunnel-engines"
 mkdir -p "$LIBS" "$JNI/arm64-v8a" "$JNI/x86_64" "$TMP"
-HEV=2.19.1
-XRAY=26.10.21
+HEV=2.18.0
+XRAY=26.9.8
 DNSTT_REPO=https://github.com/dnstt-xyz/dnstt_xyz_app.git
 
 need(){ command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1" >&2; exit 1; }; }
@@ -30,6 +30,7 @@ fetch_xray(){
 }
 fetch_xray arm64-v8a Xray-android-arm64-v8a
 fetch_xray x86_64 Xray-android-amd64
+
 # Official DNSTT client, compiled as an Android executable and packaged as a native .so
 # only so Android extracts it into nativeLibraryDir. EngineAssets executes that file directly.
 SRC="$TMP/dnstt_xyz_app"
@@ -77,21 +78,38 @@ build_dnstt(){
     rm -f "$out.tmp"
   done
   echo "ERREUR: compilation DNSTT impossible pour $abi" >&2
-  return 1
+  exit 1
 }
 build_dnstt arm64 arm64-v8a
 build_dnstt amd64 x86_64
-# Client Hysteria v1 = moteur UDP « style ZiVPN » (packagé en libhysteria.so, exécuté depuis nativeLibraryDir).
-# ⚠ Vérifiez les noms d'assets de la release ; surchargez avec HYST_URL_ARM64 / HYST_URL_X64 si besoin.
-HYST=1.3.5
-fetch_hysteria(){
-  local abi="$1" url="$2" out="$JNI/$1/libhysteria.so"
+
+# Client Hysteria v1 (profil « UDP », serveurs compatibles ZIVPN), compilé en exécutable Android
+# et empaqueté comme libhysteria.so (même principe que DNSTT).
+HYST_TAG="${HYST_TAG:-v1.3.5}"
+HYST_SRC="$TMP/hysteria-v1"
+build_hysteria(){
+  local goarch="$1" abi="$2"
+  local out="$JNI/$abi/libhysteria.so"
   if [ -s "$out" ]; then echo "Hysteria $abi déjà présent"; return; fi
-  curl -fL --retry 3 "$url" -o "$out.tmp"
-  mv "$out.tmp" "$out"; chmod 755 "$out"; test -s "$out"
+  if [ ! -d "$HYST_SRC/.git" ]; then
+    git clone --depth 1 --branch "$HYST_TAG" https://github.com/apernet/hysteria.git "$HYST_SRC"
+  fi
+  local goos
+  for goos in android linux; do
+    if (cd "$HYST_SRC" && GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
+          go build -trimpath -ldflags='-s -w' -o "$out.tmp" ./cmd); then
+      echo "Hysteria $abi compilé (GOOS=$goos)"
+      mv "$out.tmp" "$out"; chmod 755 "$out"; test -s "$out"
+      return
+    fi
+    rm -f "$out.tmp"
+  done
+  echo "ERREUR: compilation Hysteria impossible pour $abi" >&2
+  exit 1
 }
-fetch_hysteria arm64-v8a "${HYST_URL_ARM64:-https://github.com/apernet/hysteria/releases/download/app/v$HYST/hysteria-linux-arm64}"
-fetch_hysteria x86_64   "${HYST_URL_X64:-https://github.com/apernet/hysteria/releases/download/app/v$HYST/hysteria-linux-amd64}"
+build_hysteria arm64 arm64-v8a
+build_hysteria amd64 x86_64
+
 # Remove the old writable-assets engines. Native binaries must be extracted by Android;
 # executing them from app-internal writable storage is rejected on many Android builds.
 rm -rf "$ROOT/app/src/main/assets/engines"
