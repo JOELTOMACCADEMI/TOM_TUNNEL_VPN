@@ -30,6 +30,8 @@ need unzip
 need git
 need go
 need jq
+need file
+need readelf
 
 download() {
   local url="$1"
@@ -60,7 +62,6 @@ HEV_AAR="$LIBS/hev-socks5-tunnel.aar"
 
 if [ ! -s "$HEV_AAR" ]; then
   HEV_URL="https://github.com/heiher/hev-socks5-tunnel/releases/download/${HEV}/hev-socks5-tunnel.aar"
-
   download "$HEV_URL" "$HEV_AAR"
 fi
 
@@ -69,14 +70,13 @@ unzip -t "$HEV_AAR" >/dev/null
 echo "HEV AAR verified."
 
 # ==========================================
-# 2. XRAY DOWNLOAD USING GITHUB RELEASE API
+# 2. XRAY DOWNLOAD
 # ==========================================
 
 XRAY_API="https://api.github.com/repos/XTLS/Xray-core/releases/tags/v${XRAY}"
+XRAY_JSON="$TMP/xray-release.json"
 
 echo "Checking Xray release: v${XRAY}"
-
-XRAY_JSON="$TMP/xray-release.json"
 
 download "$XRAY_API" "$XRAY_JSON"
 
@@ -103,13 +103,11 @@ fetch_xray() {
   fi
 
   download "$url" "$zip"
-
   unzip -t "$zip" >/dev/null
 
   unzip -p "$zip" xray > "$output"
 
   chmod 755 "$output"
-
   test -s "$output"
 
   echo "Xray $abi installed."
@@ -125,6 +123,7 @@ fetch_xray x86_64 Xray-android-amd64
 SRC="$TMP/dnstt_xyz_app"
 
 if [ ! -d "$SRC/.git" ]; then
+  rm -rf "$SRC"
   git clone --depth 1 "$DNSTT_REPO" "$SRC"
 else
   git -C "$SRC" fetch --depth 1 origin
@@ -223,18 +222,51 @@ build_dnstt arm64 arm64-v8a
 build_dnstt amd64 x86_64
 
 # ==========================================
-# 4. HYSTERIA V1
+# 4. HYSTERIA V1 - FIXED SOURCE
 # ==========================================
 
 HYST_SRC="$TMP/hysteria-v1"
 
 if [ ! -d "$HYST_SRC/.git" ]; then
+
+  rm -rf "$HYST_SRC"
+
   git clone \
     --depth 1 \
     --branch "$HYST_TAG" \
     https://github.com/apernet/hysteria.git \
     "$HYST_SRC"
+
+else
+
+  git -C "$HYST_SRC" fetch \
+    --depth 1 origin \
+    "refs/tags/$HYST_TAG:refs/tags/$HYST_TAG"
+
+  git -C "$HYST_SRC" checkout \
+    --force --detach "$HYST_TAG"
+
 fi
+
+# IMPORTANT:
+# Hysteria v1.3.5 Go module is app/go.mod
+# Main package is app/cmd/main.go
+
+HYST_APP="$HYST_SRC/app"
+HYST_CMD="$HYST_APP/cmd"
+
+if [ ! -f "$HYST_APP/go.mod" ]; then
+  echo "ERROR: Hysteria app/go.mod not found."
+  exit 1
+fi
+
+if [ ! -f "$HYST_CMD/main.go" ]; then
+  echo "ERROR: Hysteria app/cmd/main.go not found."
+  exit 1
+fi
+
+echo "Hysteria module: $HYST_APP"
+echo "Hysteria entry point: ./cmd"
 
 build_hysteria() {
   local goarch="$1"
@@ -252,8 +284,10 @@ build_hysteria() {
 
     echo "Building Hysteria: $abi ($goos)"
 
+    rm -f "$output.tmp"
+
     if (
-      cd "$HYST_SRC"
+      cd "$HYST_APP"
 
       GOOS="$goos" \
       GOARCH="$goarch" \
@@ -275,6 +309,7 @@ build_hysteria() {
     fi
 
     rm -f "$output.tmp"
+
   done
 
   echo "ERROR: Hysteria compilation failed: $abi"
@@ -289,19 +324,23 @@ build_hysteria amd64 x86_64
 # ==========================================
 
 for ABI in arm64-v8a x86_64; do
+
   for ENGINE in xray dnstt hysteria; do
 
-    FILE="$JNI/$ABI/lib$ENGINE.so"
+    ENGINE_FILE="$JNI/$ABI/lib$ENGINE.so"
 
-    test -s "$FILE" || {
-      echo "ERROR: Missing $FILE"
+    if [ ! -s "$ENGINE_FILE" ]; then
+      echo "ERROR: Missing $ENGINE_FILE"
       exit 1
-    }
+    fi
 
-    file "$FILE"
-    readelf -h "$FILE" >/dev/null
+    echo "Checking $ENGINE_FILE"
+
+    file "$ENGINE_FILE"
+    readelf -h "$ENGINE_FILE" >/dev/null
 
   done
+
 done
 
 unzip -t "$HEV_AAR" >/dev/null
@@ -315,7 +354,9 @@ echo " TOM TUNNEL NATIVE ENGINES READY"
 echo "=========================================="
 
 find "$JNI" -maxdepth 2 -type f -print
+
 echo "HEV: $HEV_AAR"
 echo "XRAY: $XRAY"
 echo "HYSTERIA: $HYST_TAG"
+
 echo "=========================================="
