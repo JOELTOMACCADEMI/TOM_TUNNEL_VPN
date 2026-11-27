@@ -15,22 +15,40 @@ import android.view.View
 import android.graphics.Color
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts.*
+import androidx.core.content.FileProvider
 import androidx.webkit.WebViewAssetLoader
+import com.tomtunnel.app.engine.EngineAssets
+import com.tomtunnel.app.engine.HysteriaEngine
+import com.tomtunnel.app.engine.SshCommon
+import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.atomic.AtomicBoolean
+import java.security.MessageDigest
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     private lateinit var web: WebView
     private var pendingServer: String? = null
+    private var saveContent = ""
+    private var fileCb: ValueCallback<Array<Uri>>? = null
     private val statePrefs by lazy { getSharedPreferences("tomtunnel_state", MODE_PRIVATE) }
 
     private val vpnPermission = registerForActivityResult(StartActivityForResult()) {
         if (it.resultCode == RESULT_OK) startVpn() else js("window.onVpn('error','Autorisation VPN refusée')")
     }
+    // « Enregistrer » : ouvre le gestionnaire de fichiers du téléphone
+    private val createDoc = registerForActivityResult(CreateDocument("application/octet-stream")) { uri ->
+        uri?.let {
+            contentResolver.openOutputStream(it)?.use { o -> o.write(saveContent.toByteArray()) }
+            Toast.makeText(this, "Fichier enregistré", Toast.LENGTH_SHORT).show()
+        }
+    }
+    // « Importer un fichier exporté » : sélecteur de fichiers pour l'input <input type=file> de la page
+    private val picker = registerForActivityResult(StartActivityForResult()) {
+        fileCb?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(it.resultCode, it.data)); fileCb = null
+    }
     private val notifPerm = registerForActivityResult(RequestPermission()) {}
     @Volatile private var ipGen = 0
     private var netCb: android.net.ConnectivityManager.NetworkCallback? = null
-    private val udpTestRunning = AtomicBoolean(false)
     private val ipHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val ipRefresh = Runnable { refreshIp() }
 
@@ -54,7 +72,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         val night = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES
-        val bg = if (night) Color.parseColor("#070B12") else Color.parseColor("#F7F9FC")
+        val bg = if (night) Color.parseColor("#0E141B") else Color.WHITE
         window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(bg))
         if (Build.VERSION.SDK_INT >= 33) notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
         val loader = WebViewAssetLoader.Builder()
@@ -75,6 +93,11 @@ class MainActivity : ComponentActivity() {
                     val state = statePrefs.getString("state", "")
                     if (!state.isNullOrBlank()) js("window.loadNativeState(${JSONObject.quote(state)})")
                     if (VpnBus.last == "connected" || VpnBus.last == "connecting") js("window.onVpn('${VpnBus.last}','')")
+                }
+            }
+            webChromeClient = object : WebChromeClient() {
+                override fun onShowFileChooser(w: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams): Boolean {
+                    fileCb?.onReceiveValue(null); fileCb = cb; picker.launch(p.createIntent()); return true
                 }
             }
             loadUrl("https://appassets.androidplatform.net/assets/index.html")
@@ -132,7 +155,6 @@ class MainActivity : ComponentActivity() {
             statePrefs.edit().putString("state", state).apply()
         }
         @JavascriptInterface fun connect(json: String) = runOnUiThread {
-            if (VpnBus.last == "connecting" || VpnBus.last == "connected") return@runOnUiThread  // pas de connexions multiples
             pendingServer = json
             val i = VpnService.prepare(this@MainActivity)
             if (i != null) vpnPermission.launch(i) else startVpn()
@@ -140,45 +162,46 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface fun disconnect() = runOnUiThread {
             startService(Intent(this@MainActivity, TomVpnService::class.java).setAction(TomVpnService.STOP))
         }
-        @JavascriptInterface fun testUdp(json: String) {
-            if (!udpTestRunning.compareAndSet(false, true)) {
-                js("window.onUdpTest(${JSONObject.quote(JSONObject().put("ok", false).put("message", "Un test UDP est déjà en cours.").toString())})")
-                return
-            }
-            if (VpnBus.last == "connected" || VpnBus.last == "connecting") {
-                udpTestRunning.set(false)
-                val result = JSONObject().put("ok", false).put("message", "Déconnectez le VPN avant de tester UDP.")
-                js("window.onUdpTest(${JSONObject.quote(result.toString())})")
-                return
-            }
-            Thread({
-                val result = try {
-                    val profile = JSONObject(json).put("type", "UDP")
-                    val message = com.tomtunnel.app.engine.UdpEngine().testConnection(this@MainActivity, profile)
-                    JSONObject().put("ok", true).put("message", message)
-                } catch (e: Throwable) {
-                    JSONObject().put("ok", false).put("message", (e.message ?: "Échec du test UDP").take(500))
-                } finally {
-                    udpTestRunning.set(false)
-                }
-                js("window.onUdpTest(${JSONObject.quote(result.toString())})")
-            }, "tom-udp-connectivity-test").start()
-        }
-        /** Identifiant d'installation TOM-XXXX-XXXX-XXXX (lecture seule). */
-        @JavascriptInterface fun getDeviceId(): String = DeviceId.get(this@MainActivity)
-        @JavascriptInterface fun resetHostKeys() {
-            com.tomtunnel.app.engine.HostKeyStore.init(this@MainActivity); com.tomtunnel.app.engine.HostKeyStore.reset()
-        }
-        @JavascriptInterface fun clearCache() {
-            try { filesDir.listFiles { f -> f.name.endsWith(".log") }?.forEach { it.delete() } } catch (_: Throwable) {}
-            runOnUiThread { try { web.clearCache(true) } catch (_: Throwable) {} }
-        }
-        @JavascriptInterface fun techInfo(): String = JSONObject()
-            .put("android", Build.VERSION.RELEASE).put("sdk", Build.VERSION.SDK_INT)
-            .put("abi", Build.SUPPORTED_ABIS.joinToString(",")).put("model", Build.MODEL)
-            .put("engines", org.json.JSONArray(listOf("SSH (JSch 0.2.18)", "UDP (Hysteria v1)", "Xray-core"))).toString()
         @JavascriptInterface fun refreshIp() { this@MainActivity.refreshIp() }
+        /** Test réel du profil UDP : démarre Hysteria sur un port de test et passe un vrai trafic dans le tunnel. */
+        @JavascriptInterface fun testUdp(json: String) {
+            Thread {
+                val res = JSONObject()
+                val eng = HysteriaEngine(10809, "hysteria-test")
+                try {
+                    val t0 = System.currentTimeMillis()
+                    eng.start(applicationContext, JSONObject(json))
+                    res.put("ok", true).put("message", "tunnel UDP établi en ${System.currentTimeMillis() - t0} ms, trafic OK.")
+                } catch (e: Throwable) {
+                    res.put("ok", false).put("message", (e.message ?: e.javaClass.simpleName).take(600))
+                } finally { try { eng.stop() } catch (_: Throwable) {} }
+                js("window.onUdpTest(${JSONObject.quote(res.toString())})")
+            }.start()
+        }
+        @JavascriptInterface fun techInfo(): String {
+            val names = mapOf("xray" to "Xray (V2Ray)", "dnstt" to "DNSTT (SlowDNS)", "hysteria" to "Hysteria v1 (UDP)")
+            val engines = JSONArray()
+            EngineAssets.available(this@MainActivity).forEach { engines.put(names[it] ?: it) }
+            engines.put("JSch (SSH)"); engines.put("hev-socks5-tunnel")
+            return JSONObject().put("android", Build.VERSION.RELEASE).put("sdk", Build.VERSION.SDK_INT)
+                .put("model", "${Build.MANUFACTURER} ${Build.MODEL}")
+                .put("abi", Build.SUPPORTED_ABIS.joinToString(", "))
+                .put("engines", engines).toString()
+        }
+        @JavascriptInterface fun getDeviceId(): String {
+            val aid = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: ""
+            val h = MessageDigest.getInstance("SHA-256").digest("$aid:$packageName".toByteArray())
+                .joinToString("") { "%02X".format(it) }
+            return "TOM-${h.substring(0, 4)}-${h.substring(4, 8)}-${h.substring(8, 12)}"
+        }
+        @JavascriptInterface fun resetHostKeys() { SshCommon.knownHosts(this@MainActivity).delete() }
+        @JavascriptInterface fun clearCache() = runOnUiThread {
+            try { web.clearCache(true) } catch (_: Throwable) {}
+            cacheDir.listFiles()?.forEach { it.deleteRecursively() }
+            filesDir.listFiles { f -> f.name.endsWith(".log") }?.forEach { it.delete() }
+        }
         @JavascriptInterface fun openUrl(u: String) = runOnUiThread { this@MainActivity.openUrl(u) }
+        @JavascriptInterface fun saveFile(name: String, content: String) = runOnUiThread { saveContent = content; createDoc.launch(name) }
         @JavascriptInterface fun shareText(txt: String) = runOnUiThread {
             val i = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, txt) }
             startActivity(Intent.createChooser(i, "Partager"))
@@ -190,6 +213,23 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface fun copyText(t: String) = runOnUiThread {
             (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("tom", t))
             Toast.makeText(this@MainActivity, "Copié", Toast.LENGTH_SHORT).show()
+        }
+        // partage vers WhatsApp / Telegram / Messages... (le fichier exporté est joint)
+        @JavascriptInterface fun shareFile(name: String, content: String, app: String) = runOnUiThread {
+            val dir = File(cacheDir, "exports").apply { mkdirs() }
+            val f = File(dir, name.replace(Regex("[^A-Za-z0-9._-]"), "_")).apply { writeText(content) }
+            val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", f)
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "application/octet-stream"; putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val pkg = mapOf("Telegram" to "org.telegram.messenger", "WhatsApp" to "com.whatsapp")[app]
+            try {
+                if (pkg == null) throw ActivityNotFoundException()
+                startActivity(Intent(send).setPackage(pkg))
+            } catch (e: ActivityNotFoundException) {
+                startActivity(Intent.createChooser(send, "Partager"))
+            }
         }
     }
 }
