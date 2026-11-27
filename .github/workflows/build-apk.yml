@@ -1,87 +1,76 @@
 
-name: Build TOM TUNNEL Android APK
+name: Compile TOM TUNNEL Android
 
 on:
-  push:
-    branches:
-      - main
-      - master
-    tags:
-      - "v*"
-  pull_request:
-    branches:
-      - main
-      - master
   workflow_dispatch:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
 
 permissions:
   contents: write
 
 concurrency:
-  group: tom-tunnel-apk-${{ github.ref }}
+  group: tom-tunnel-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Compile TOM TUNNEL APK
     runs-on: ubuntu-24.04
     timeout-minutes: 90
 
     steps:
-      # 1. Download project
-      - name: Checkout source
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      # 2. Java 17
-      - name: Install Java 17
+      - name: Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # 3. Go compiler
-      - name: Install Go
+      - name: Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23.x"
+          go-version: "1.24.x"
           cache: false
 
-      # 4. Android SDK
-      - name: Setup Android SDK
+      - name: Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Install Android packages
         run: |
           sdkmanager --install \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0"
 
-          yes | sdkmanager --licenses >/dev/null || true
+          yes | sdkmanager --licenses || true
 
-      # 5. Gradle
-      - name: Setup Gradle 8.7
+      - name: Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
 
-      # 6. Validate project
-      - name: Validate project structure
-        shell: bash
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git curl unzip jq \
+            build-essential binutils \
+            python3
+
+      - name: Validate source files
         run: |
           set -e
-
-          test -f settings.gradle.kts
-          test -f build.gradle.kts
-          test -f app/build.gradle.kts
           test -f script/bootstrap-engines.sh
+          test -f app/build.gradle.kts
+          test -f settings.gradle.kts
 
-          echo "Project structure validated."
-
-      # 7. FIX HYSTERIA COMPILER
-      - name: Fix Hysteria v1 build paths
+      # FIX EXACT HYSTERIA PATH
+      - name: Patch Hysteria source path
         shell: bash
         run: |
           set -euo pipefail
@@ -92,46 +81,41 @@ jobs:
           p = Path("script/bootstrap-engines.sh")
           s = p.read_text()
 
-          marker = 'build_hysteria(){'
+          old = '''      cd "$HYST_SRC"
 
-          if marker not in s:
-              raise SystemExit("Hysteria build function not found")
+      GOOS="$goos" \\
+      GOARCH="$goarch" \\
+      CGO_ENABLED=0 \\
+      go build'''
 
-          before, after = s.split(marker, 1)
+          new = '''      cd "$HYST_SRC/app"
 
-          old_path = 'cd "$HYST_SRC" &&'
-          new_path = 'cd "$HYST_SRC/app" &&'
+      GOOS="$goos" \\
+      GOARCH="$goarch" \\
+      CGO_ENABLED=0 \\
+      go build'''
 
-          if old_path not in after:
-              raise SystemExit("Hysteria source path not found")
+          if old not in s:
+              raise SystemExit(
+                  "ERROR: Expected Hysteria build block not found. "
+                  "Refusing to apply an unsafe patch."
+              )
 
-          after = after.replace(old_path, new_path, 1)
+          s = s.replace(old, new, 1)
 
-          old_loop = 'for goos in android linux; do'
+          p.write_text(s)
 
-          if old_loop not in after:
-              raise SystemExit("Hysteria OS build loop not found")
-
-          after = after.replace(
-              old_loop,
-              'for goos in linux; do',
-              1
-          )
-
-          p.write_text(before + marker + after)
-
-          print("Hysteria build path corrected.")
-          print("Static Linux Go compilation enabled.")
+          print("Hysteria path corrected successfully.")
           PY
 
-          grep -A25 'build_hysteria(){' script/bootstrap-engines.sh
+          grep -A35 'build_hysteria()' script/bootstrap-engines.sh
 
-      # 8. Build VPN native engines
-      - name: Build VPN native engines
+      # BUILD NATIVE ENGINES
+      - name: Build VPN engines
         shell: bash
         env:
           HYST_TAG: v1.3.5
-          GOTOOLCHAIN: local
+          GOTOOLCHAIN: auto
         run: |
           set -euo pipefail
 
@@ -139,18 +123,8 @@ jobs:
 
           bash script/bootstrap-engines.sh
 
-          echo "Native engines successfully prepared."
-
-          find app/src/main/jniLibs \
-            -maxdepth 2 -type f -print
-
-          test -s app/libs/hev-socks5-tunnel.aar
-          test -s app/src/main/jniLibs/arm64-v8a/libxray.so
-          test -s app/src/main/jniLibs/arm64-v8a/libdnstt.so
-          test -s app/src/main/jniLibs/arm64-v8a/libhysteria.so
-
-      # 9. Validate native architectures
-      - name: Validate native architectures
+      # VALIDATE ENGINES
+      - name: Validate VPN engines
         shell: bash
         run: |
           set -euo pipefail
@@ -158,16 +132,19 @@ jobs:
           for ABI in arm64-v8a x86_64; do
             DIR="app/src/main/jniLibs/$ABI"
 
-            test -s "$DIR/libxray.so"
-            test -s "$DIR/libdnstt.so"
-            test -s "$DIR/libhysteria.so"
+            for ENGINE in xray dnstt hysteria; do
+              FILE="$DIR/lib$ENGINE.so"
 
-            echo "Validated ABI: $ABI"
+              test -s "$FILE"
+              file "$FILE"
+              readelf -h "$FILE"
+            done
           done
 
-      # 10. Build APK
-      - name: Build TOM TUNNEL APK
-        shell: bash
+          test -s app/libs/hev-socks5-tunnel.aar
+
+      # BUILD APK
+      - name: Compile TOM TUNNEL APK
         run: |
           set -euo pipefail
 
@@ -176,9 +153,8 @@ jobs:
             :app:clean \
             :app:assembleDebug
 
-      # 11. Verify APK
-      - name: Verify generated APK
-        shell: bash
+      # VERIFY APK
+      - name: Verify APK
         run: |
           set -euo pipefail
 
@@ -186,46 +162,37 @@ jobs:
 
           test -s "$APK"
 
-          echo "APK successfully generated."
-
           ls -lh "$APK"
 
           "$ANDROID_HOME/build-tools/34.0.0/aapt" \
-            dump badging "$APK" | head -n 10
+            dump badging "$APK"
 
-      # 12. Prepare APK
-      - name: Prepare APK artifact
-        shell: bash
+      # PREPARE APK
+      - name: Prepare release files
         run: |
           set -euo pipefail
 
-          VERSION=$(sed -n \
-            's/.*versionName *= *"\([^"]*\)".*/\1/p' \
-            app/build.gradle.kts | head -n 1)
-
-          VERSION="${VERSION:-1.0.0}"
-
-          mkdir -p release-apk
+          mkdir -p release
 
           cp app/build/outputs/apk/debug/app-debug.apk \
-            "release-apk/TOM-TUNNEL-${VERSION}.apk"
+            release/TOM-TUNNEL.apk
 
-          sha256sum release-apk/*.apk \
-            > release-apk/SHA256SUMS.txt
+          sha256sum release/TOM-TUNNEL.apk \
+            > release/SHA256SUMS.txt
 
-      # 13. Upload APK
-      - name: Upload TOM TUNNEL APK
+      # UPLOAD
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: TOM-TUNNEL-ANDROID-APK
-          path: release-apk/*
+          name: TOM-TUNNEL-APK
+          path: release/*
           if-no-files-found: error
           retention-days: 30
 
-      # 14. Publish GitHub Release on version tags
-      - name: Publish GitHub Release
+      # GITHUB RELEASE
+      - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: release-apk/*
+          files: release/*
           generate_release_notes: true
