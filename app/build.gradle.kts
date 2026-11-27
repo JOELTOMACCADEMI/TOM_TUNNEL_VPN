@@ -1,17 +1,28 @@
-plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
 
 android {
     namespace = "com.tomtunnel.app"
     compileSdk = 34
+
     defaultConfig {
         applicationId = "com.tomtunnel.app"
-        minSdk = 24
+
+        // HEV SOCKS5 Tunnel AAR 2.18.0 déclare minSdkVersion 29.
+        // L'application doit donc également cibler au minimum Android 10.
+        minSdk = 29
+
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
-        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
-    // Signature release : activée seulement si KEYSTORE_FILE est défini (workflow GitHub Actions).
+
     signingConfigs {
         create("release") {
             val ks = System.getenv("KEYSTORE_FILE")
@@ -23,15 +34,30 @@ android {
             }
         }
     }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            if (System.getenv("KEYSTORE_FILE") != null) signingConfig = signingConfigs.getByName("release")
+            if (System.getenv("KEYSTORE_FILE") != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
-    compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
-    kotlinOptions { jvmTarget = "17" }
-    packaging { jniLibs { useLegacyPackaging = true } }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }
 
 dependencies {
