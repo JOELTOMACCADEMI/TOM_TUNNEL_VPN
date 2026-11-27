@@ -118,8 +118,7 @@ jobs:
           set -Eeuo pipefail
           bash script/bootstrap-engines.sh
 
-      # Le code Kotlin actuel appelle socksProbe() depuis TomVpnService
-      # et HysteriaEngine, mais cette fonction n'existe pas dans Engine.kt.
+      # Le code Kotlin appelle socksProbe() depuis TomVpnService et HysteriaEngine.
       # On ajoute son implémentation uniquement si le dépôt ne la contient pas déjà.
       - name: Ensure SOCKS5 connectivity probe exists
         shell: bash
@@ -240,6 +239,22 @@ jobs:
           fi
           grep -E '^android\.(useAndroidX|enableJetifier)=' gradle.properties
 
+      # Correctif de l'erreur « OutOfMemoryError: Java heap space » pendant le packaging de l'APK
+      # (les binaires xray/dnstt/hysteria pour 2 architectures dépassent le tas Gradle de 2 Go).
+      - name: Configure Gradle memory
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          touch gradle.properties
+          sed -i '/^org\.gradle\.jvmargs=/d;/^kotlin\.daemon\.jvmargs=/d;/^org\.gradle\.parallel=/d' gradle.properties
+          {
+            echo 'org.gradle.jvmargs=-Xmx5g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8'
+            echo 'kotlin.daemon.jvmargs=-Xmx2g'
+            echo 'org.gradle.parallel=false'
+          } >> gradle.properties
+          cat gradle.properties
+          free -h
+
       - name: Compile TOM TUNNEL debug APK
         shell: bash
         run: |
@@ -247,11 +262,10 @@ jobs:
           gradle \
             --no-daemon \
             --stacktrace \
-            --info \
             --max-workers=2 \
             --no-build-cache \
             :app:clean \
-            :app:assembleDebug
+            :app:assembleDebug 2>&1 | tee gradle-build.log
 
       - name: Verify generated APK
         shell: bash
@@ -282,12 +296,26 @@ jobs:
           files: release/*
           generate_release_notes: true
 
+      # Affiche les erreurs Kotlin/Gradle en haut du résumé du run (pratique sur téléphone).
+      - name: Show compile errors in summary
+        if: failure()
+        shell: bash
+        run: |
+          [ -f gradle-build.log ] || exit 0
+          {
+            echo "## Erreurs de compilation"
+            echo '```'
+            grep -E '^e: |OutOfMemoryError|What went wrong|Execution failed|FAILED' -A2 gradle-build.log | head -n 150 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload Gradle diagnostic reports
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: TOM-TUNNEL-BUILD-DIAGNOSTICS
           path: |
+            gradle-build.log
             app/build/reports/
             app/build/test-results/
           if-no-files-found: ignore
@@ -301,7 +329,7 @@ jobs:
             echo "## TOM TUNNEL Android build"
             echo ""
             echo "- Java: 17"
-            echo "- Gradle: 8.7"
+            echo "- Gradle: 8.7 (heap 5 Go)"
             echo "- DNSTT Go: 1.24"
             echo "- Hysteria Go: 1.20.14"
             echo "- Hysteria tag: $HYST_TAG"
@@ -309,4 +337,3 @@ jobs:
             echo "- Android API: 34"
             echo "- NDK: 27.2.12479018"
           } >> "$GITHUB_STEP_SUMMARY"
-          
