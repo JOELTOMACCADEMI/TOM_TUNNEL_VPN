@@ -13,79 +13,55 @@ import org.json.JSONObject
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.util.concurrent.Executors
-import kotlin.concurrent.thread
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 
 class TomVpnService : VpnService() {
-    companion object { const val STOP = "com.tomtunnel.app.STOP"; const val RECONNECT = "com.tomtunnel.app.RECONNECT" }
+    companion object {
+        const val STOP = "com.tomtunnel.app.STOP"; const val RECONNECT = "com.tomtunnel.app.RECONNECT"
+        private val XRAY_TYPES = setOf("VLESS", "VMESS", "TROJAN", "SHADOWSOCKS")
+        private const val MAX_RETRIES = 5
+    }
+    @Volatile private var stopped = false
+    @Volatile private var retries = 0
     private var lastServer: JSONObject? = null
     @Volatile private var gen = 0
     private var tun: ParcelFileDescriptor? = null
     private var engine: Engine? = null
     @Volatile private var running = false
-    /** Toutes les opérations de cycle de vie (connexion / reconnexion) passent par ce thread unique : pas de connexions multiples. */
-    private val exec = Executors.newSingleThreadExecutor()
-    /** Incrémenté à chaque arrêt ou nouvelle demande : une opération périmée s'interrompt sans toucher à l'état. */
-    @Volatile private var opGen = 0
-    @Volatile private var autoReconnect = true
-    @Volatile private var attempts = 0
-    private val MAX_ATTEMPTS = 5
-    private var netCb: ConnectivityManager.NetworkCallback? = null
-    @Volatile private var curNet: Network? = null
 
     override fun onStartCommand(i: Intent?, flags: Int, id: Int): Int {
-        if (i?.action == STOP) { opGen++; shutdown("idle", ""); return START_NOT_STICKY }
+        if (i?.action == STOP) { shutdown("idle", ""); return START_NOT_STICKY }
         if (i?.action == RECONNECT) {
             val s = lastServer ?: return START_NOT_STICKY
+            stopped = false; retries = 0
             goForeground(s, false)
-            attempts = 0
-            val g = ++opGen
-            exec.execute { reconnect(s, g) }
+            Thread { reconnect(s) }.start()
             return START_NOT_STICKY
         }
-        val raw = i?.getStringExtra("server")
-        val srv = try { if (raw.isNullOrBlank()) null else JSONObject(raw) } catch (_: Throwable) { null }
-        if (srv == null) {
-            // Android exige un startForeground() après startForegroundService() : on le fait avant de quitter.
-            goForeground(null, false)
-            shutdown("error", "Configuration du serveur invalide")
-            return START_NOT_STICKY
-        }
+        stopped = false; retries = 0
+        val raw = i?.getStringExtra("server") ?: return START_NOT_STICKY
+        val srv = JSONObject(raw)
         lastServer = srv
-        autoReconnect = srv.optBoolean("autoReconnect", true)
-        attempts = 0
         goForeground(srv, false)
-        val g = ++opGen   // une nouvelle demande annule toute opération en cours
-        exec.execute { launch(srv, g) }
+        Thread { launch(srv) }.start()
         return START_NOT_STICKY
     }
 
-    private fun stale(g: Int) = g != opGen
-
-    private fun launch(s: JSONObject, g: Int) {
+    private fun launch(s: JSONObject) {
         try {
-            if (stale(g)) return
-            VpnBus.state("connecting")
-            HostKeyStore.init(this)
-            watchNetwork()
-            try { TProxyService.TProxyStopService() } catch (_: Throwable) {}
-            try { engine?.stop() } catch (_: Throwable) {}
-            try { tun?.close() } catch (_: Throwable) {}
-            engine = null; tun = null
-            EngineManager.ensureLocalPortFree()
-            engine = EngineManager.create(s)
+            engine = when (val t = s.optString("type")) {
+                "SSH SlowDNS" -> SlowDnsEngine()
+                "SSH WebSocket", "SSH TCP" -> SshEngine()
+                "UDP" -> HysteriaEngine()
+                else -> if (t.uppercase() in XRAY_TYPES) XrayEngine()
+                        else error("Protocole non pris en charge dans cette version : $t")
+            }
             engine!!.start(this, s)
-            if (stale(g)) { try { engine?.stop() } catch (_: Throwable) {}; engine = null; return }
 
             tun = Builder().setSession("TOM TUNNEL").setMtu(1400)
                 .addAddress("10.10.14.1", 30)
                 .addAddress("fd00:10:10:14::1", 128)
                 .addRoute("0.0.0.0", 0).addRoute("::", 0)
-                .addDnsServer(s.optString("dns", "1.1.1.1").trim().ifEmpty { "1.1.1.1" })
+                .addDnsServer(s.optString("dns", "1.1.1.1").ifEmpty { "1.1.1.1" })
                 .addDisallowedApplication(packageName)
                 .establish() ?: error("Interface VPN refusée")
 
@@ -103,7 +79,7 @@ class TomVpnService : VpnService() {
                 misc:
                   log-file: ${File(filesDir, "hev-runtime.log").absolutePath}
                   log-level: info
-                  connect-timeout: 30000
+                  connect-timeout: 15000
                   tcp-read-write-timeout: 120000
                 """.trimIndent())
             check(TProxyService.TProxyStartService(cfg.absolutePath, tun!!.fd)) {
@@ -113,31 +89,30 @@ class TomVpnService : VpnService() {
             check(TProxyService.TProxyIsRunning()) {
                 "tun2socks s'est arrêté: ${tail(File(filesDir, "hev-runtime.log"), 1600)}"
             }
-            // Un tunnel DNS est lent : plusieurs essais avec de longs délais avant de conclure à l'échec.
-            val targets = listOf("1.1.1.1" to 443, "8.8.8.8" to 443, "1.1.1.1" to 443)
-            check(targets.any { (h, p) -> probeSocks(h, p) }) {
+            check(socksProbe(Engine.SOCKS_PORT, "1.1.1.1", 443)) {
                 "Le proxy ${Engine.SOCKS_PORT} ne peut pas joindre Internet via le serveur"
             }
-            if (stale(g)) return
             running = true
-            attempts = 0
             VpnBus.state("connected")
             notifyState(s, true)
-            thread(isDaemon = true, name = "TomStats") { pollStats(s, g) }
-        } catch (e: Throwable) {
-            if (stale(g)) return
-            // Échec pendant une reconnexion automatique : on retente avec attente croissante.
-            if (attempts > 0 && attempts < MAX_ATTEMPTS && autoReconnect) scheduleRetry(s, e.message) else shutdown("error", e.message ?: e.javaClass.simpleName)
-        }
+            pollStats(s)
+        } catch (e: Throwable) { shutdown("error", e.message ?: e.javaClass.simpleName) }
     }
 
-    private fun pollStats(s: JSONObject, op: Int) {
+    private fun pollStats(s: JSONObject) {
         var lastTx = 0L; var lastRx = 0L; var ping = -1; var n = 0
         val g = ++gen
-        while (running && g == gen && !stale(op)) {
-            if (n % 3 == 0 && engine?.isAlive() == false) {
-                if (autoReconnect) { beginAutoReconnect(s, "Tunnel interrompu") }
-                else shutdown("error", "Le tunnel s'est interrompu (serveur injoignable ou session fermée). Reconnectez-vous.")
+        val t0 = System.currentTimeMillis()
+        while (running && g == gen) {
+            if (retries > 0 && System.currentTimeMillis() - t0 > 30000) retries = 0
+            if (engine?.alive() == false) {
+                running = false
+                if (s.optBoolean("autoReconnect", true) && retries < MAX_RETRIES) {
+                    retries++
+                    VpnBus.state("connecting")
+                    notifyState(s, false)
+                    Thread { reconnect(s) }.start()
+                } else shutdown("error", "Connexion perdue")
                 return
             }
             if (n++ % 10 == 0) ping = tcpPing(s)
@@ -151,43 +126,7 @@ class TomVpnService : VpnService() {
         }
     }
 
-    private fun probeSocks(host: String, port: Int): Boolean = try {
-        Socket().use { socket ->
-            socket.connect(InetSocketAddress("127.0.0.1", Engine.SOCKS_PORT), 5000)
-            socket.soTimeout = 25000
-            val out = socket.getOutputStream(); val input = socket.getInputStream()
-            out.write(byteArrayOf(5, 1, 0)); out.flush()
-            val hello = ByteArray(2); readFully(input, hello)
-            check(hello[0].toInt() == 5 && hello[1].toInt() == 0)
-            val hb = host.toByteArray(Charsets.UTF_8)
-            require(hb.size <= 255)
-            out.write(byteArrayOf(5, 1, 0, 3, hb.size.toByte())); out.write(hb)
-            out.write(byteArrayOf((port ushr 8).toByte(), port.toByte())); out.flush()
-            val h = ByteArray(4); readFully(input, h)
-            if (h[1].toInt() != 0) return false
-            val len = when (h[3].toInt() and 255) {
-                1 -> 4
-                3 -> input.read().also { check(it >= 0) }
-                4 -> 16
-                else -> return false
-            }
-            val rest = if ((h[3].toInt() and 255) == 3) len else len
-            if ((h[3].toInt() and 255) == 3) readFully(input, ByteArray(rest)) else readFully(input, ByteArray(rest))
-            readFully(input, ByteArray(2))
-            true
-        }
-    } catch (_: Throwable) { false }
-
-    private fun readFully(input: java.io.InputStream, buf: ByteArray) {
-        var off = 0
-        while (off < buf.size) {
-            val n = input.read(buf, off, buf.size - off)
-            if (n < 0) error("EOF SOCKS")
-            off += n
-        }
-    }
-
-    private fun tcpPing(s: JSONObject): Int = if (s.optString("type") == "SSH SlowDNS" || s.optString("type") == "UDP" || s.optString("type").equals("WireGuard", true) || s.optString("type").equals("XRAY-SLOWDNS", true)) -1 else try {
+    private fun tcpPing(s: JSONObject): Int = try {
         val host = s.optString("addr").ifEmpty { s.optString("host") }
         val port = (s.optString("port").ifEmpty { s.optString("sshPort") }).toIntOrNull() ?: 443
         val t = System.currentTimeMillis()
@@ -195,79 +134,30 @@ class TomVpnService : VpnService() {
         (System.currentTimeMillis() - t).toInt()
     } catch (_: Throwable) { -1 }
 
-    @Synchronized
     private fun shutdown(state: String, msg: String) {
+        stopped = true
         running = false
-        gen++
         try { TProxyService.TProxyStopService() } catch (_: Throwable) {}
         try { engine?.stop() } catch (_: Throwable) {}
         try { tun?.close() } catch (_: Throwable) {}
         engine = null; tun = null
-        unwatchNetwork()
         VpnBus.state(state, msg)
         stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
     }
 
-    override fun onRevoke() { opGen++; shutdown("idle", "") }
-    override fun onDestroy() { running = false; opGen++; unwatchNetwork(); exec.shutdownNow(); super.onDestroy() }
+    override fun onRevoke() { shutdown("idle", "") }
+    override fun onDestroy() { running = false; super.onDestroy() }
 
-    private fun reconnect(s: JSONObject, g: Int) {
+    private fun reconnect(s: JSONObject) {
         running = false
         try { TProxyService.TProxyStopService() } catch (_: Throwable) {}
         try { engine?.stop() } catch (_: Throwable) {}
         try { tun?.close() } catch (_: Throwable) {}
         engine = null; tun = null
-        Thread.sleep(500)
-        if (stale(g)) return
+        Thread.sleep(if (retries > 0) 1500L * retries else 500L)
+        if (stopped) return
         VpnBus.state("connecting")
-        launch(s, g)
-    }
-
-    /** Perte du tunnel : reconnexion automatique avec attente 2, 4, 8, 16, 30 s (5 essais maximum). */
-    private fun beginAutoReconnect(s: JSONObject, why: String?) {
-        running = false
-        if (attempts >= MAX_ATTEMPTS) { shutdown("error", "Reconnexion impossible après $MAX_ATTEMPTS essais. ${why.orEmpty()}".trim()); return }
-        scheduleRetry(s, why)
-    }
-
-    private fun scheduleRetry(s: JSONObject, why: String?) {
-        attempts++
-        val wait = minOf(30L, 2L shl (attempts - 1))
-        val g = ++opGen
-        VpnBus.state("connecting", "Reconnexion automatique ($attempts/$MAX_ATTEMPTS) dans ${wait}s…")
-        notifyState(s, false)
-        thread(isDaemon = true, name = "TomRetry") {
-            try { Thread.sleep(wait * 1000) } catch (_: InterruptedException) { return@thread }
-            if (!stale(g)) try { exec.execute { if (!stale(g)) reconnect(s, g) } } catch (_: Throwable) {}
-        }
-    }
-
-    /** Changement Wi-Fi <-> données mobiles : les sockets du moteur sont liées à l'ancien réseau, on reconnecte. */
-    private fun watchNetwork() {
-        if (netCb != null) return
-        try {
-            val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
-            val cb = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(n: Network) {
-                    val prev = curNet; curNet = n
-                    val s = lastServer
-                    if (prev != null && prev != n && running && autoReconnect && s != null) {
-                        attempts = 0
-                        running = false
-                        scheduleRetry(s, "Changement de réseau")
-                    }
-                }
-                override fun onLost(n: Network) { if (curNet == n) curNet = null }
-            }
-            // NetworkRequest.Builder() exclut déjà les réseaux VPN (NOT_VPN par défaut) : on ne voit que Wi-Fi / mobile.
-            cm.registerNetworkCallback(NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build(), cb)
-            netCb = cb
-        } catch (_: Throwable) {}
-    }
-
-    private fun unwatchNetwork() {
-        try { netCb?.let { (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it) } } catch (_: Throwable) {}
-        netCb = null; curNet = null
+        launch(s)
     }
 
     private fun buildNotif(s: JSONObject?, connected: Boolean): Notification {
@@ -278,14 +168,8 @@ class TomVpnService : VpnService() {
         fun act(a: String, code: Int) = PendingIntent.getService(this, code,
             Intent(this, TomVpnService::class.java).setAction(a),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        // Le constructeur avec channel n'existe qu'à partir d'Android 8 (API 26).
-        val b = if (Build.VERSION.SDK_INT >= 26) {
-            Notification.Builder(this, "vpn")
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-        }
-        b.setContentTitle(if (connected) "VPN connecté" else "Connexion en cours…")
+        val b = Notification.Builder(this, "vpn")
+            .setContentTitle(if (connected) "VPN connecté" else "Connexion en cours…")
             .setContentText(name)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false)
@@ -305,10 +189,9 @@ class TomVpnService : VpnService() {
 
     private fun goForeground(s: JSONObject?, connected: Boolean) {
         val nm = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= 26) {
-            nm.createNotificationChannel(NotificationChannel("vpn", "VPN", NotificationManager.IMPORTANCE_LOW))
-        }
+        nm.createNotificationChannel(NotificationChannel("vpn", "VPN", NotificationManager.IMPORTANCE_LOW))
         val n = buildNotif(s, connected)
         if (Build.VERSION.SDK_INT >= 34) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) else startForeground(1, n)
     }
 }
+
