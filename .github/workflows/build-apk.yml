@@ -3,16 +3,11 @@ name: Build TOM TUNNEL Android APK
 
 on:
   push:
-    branches:
-      - main
-      - master
-    tags:
-      - "v*"
+    branches: [main, master]
+    tags: ["v*"]
 
   pull_request:
-    branches:
-      - main
-      - master
+    branches: [main, master]
 
   workflow_dispatch:
 
@@ -24,36 +19,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-apk:
+  build:
     name: Compile TOM TUNNEL Android
     runs-on: ubuntu-24.04
     timeout-minutes: 90
 
     env:
-      JAVA_VERSION: "17"
-      GO_VERSION: "1.24.x"
-      GRADLE_VERSION: "8.7"
-      ANDROID_API: "34"
-      BUILD_TOOLS: "34.0.0"
-      NDK_VERSION: "27.2.12479018"
-      HYST_TAG: "v1.3.5"
+      HYST_TAG: v1.3.5
+      ANDROID_API: "24"
 
     steps:
 
-      # 1. CHECKOUT
+      # 1. SOURCE
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # 2. JAVA
-      - name: Setup Java 17
+      # 2. JAVA 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # 3. GO
+      # 3. GO 1.24 FOR DNSTT
       - name: Setup Go 1.24
         uses: actions/setup-go@v5
         with:
@@ -64,7 +54,7 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      # 5. INSTALL ANDROID NDK
+      # 5. ANDROID NDK
       - name: Install Android SDK and NDK
         shell: bash
         run: |
@@ -83,62 +73,72 @@ jobs:
 
           test -d "$ANDROID_HOME/ndk/27.2.12479018"
 
-      # 6. VALIDATE ENVIRONMENT
-      - name: Validate build environment
+      # 6. GO 1.20.14 FOR HYSTERIA
+      - name: Install Go 1.20.14
         shell: bash
         run: |
           set -euo pipefail
 
-          java -version
-          go version
-          gradle --version || true
+          GO_DIR="$RUNNER_TEMP/go1.20.14"
 
-          test -f settings.gradle.kts
-          test -f build.gradle.kts
-          test -f app/build.gradle.kts
+          mkdir -p "$GO_DIR"
 
-          test -f script/bootstrap-engines.sh
+          curl -fL \
+            --retry 5 \
+            --retry-all-errors \
+            https://go.dev/dl/go1.20.14.linux-amd64.tar.gz \
+            -o "$RUNNER_TEMP/go1.20.14.tar.gz"
 
-          test -d "$ANDROID_NDK_HOME"
+          tar -xzf "$RUNNER_TEMP/go1.20.14.tar.gz" \
+            -C "$GO_DIR" \
+            --strip-components=1
 
-          echo "Environment validated."
+          "$GO_DIR/bin/go" version
 
-      # 7. BUILD DEPENDENCIES
+          echo "HYST_GO=$GO_DIR/bin/go" >> "$GITHUB_ENV"
+
+      # 7. GRADLE
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      # 8. DEPENDENCIES
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
 
           sudo apt-get install -y \
             curl \
-            unzip \
-            zip \
             git \
             jq \
+            unzip \
+            zip \
             file \
             binutils \
             build-essential \
-            ca-certificates \
             python3
 
-      # 8. GRADLE
-      - name: Setup Gradle 8.7
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.7"
+      # 9. VERIFY COMPILERS
+      - name: Verify build environment
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      # 9. GO MODULE CACHE
-      - name: Cache Go modules
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: tom-tunnel-go-${{ runner.os }}-${{ hashFiles('script/bootstrap-engines.sh') }}
-          restore-keys: |
-            tom-tunnel-go-${{ runner.os }}-
+          java -version
+          go version
+          "$HYST_GO" version
 
-      # 10. VALIDATE HYSTERIA SOURCE
-      - name: Validate Hysteria release structure
+          test -d "$ANDROID_NDK_HOME"
+
+          test -f script/bootstrap-engines.sh
+          test -f app/build.gradle.kts
+          test -f settings.gradle.kts
+
+          echo "Build environment ready."
+
+      # 10. VALIDATE HYSTERIA
+      - name: Verify Hysteria source
         shell: bash
         run: |
           set -euo pipefail
@@ -147,61 +147,32 @@ jobs:
             --depth 1 \
             --branch "$HYST_TAG" \
             https://github.com/apernet/hysteria.git \
-            /tmp/hysteria-check
+            "$RUNNER_TEMP/hysteria-check"
 
-          test -f /tmp/hysteria-check/app/go.mod
-          test -f /tmp/hysteria-check/app/cmd/main.go
+          test -f "$RUNNER_TEMP/hysteria-check/app/go.mod"
+          test -f "$RUNNER_TEMP/hysteria-check/app/cmd/main.go"
 
           echo "Hysteria source validated."
 
-      # 11. PREPARE DIRECTORIES
+      # 11. PREPARE
       - name: Prepare native directories
-        shell: bash
         run: |
-          set -euo pipefail
-
           mkdir -p app/libs
           mkdir -p app/src/main/jniLibs/arm64-v8a
           mkdir -p app/src/main/jniLibs/x86_64
 
           chmod +x script/bootstrap-engines.sh
 
-      # 12. BUILD ALL VPN ENGINES
+      # 12. BUILD ENGINES
       - name: Build VPN native engines
         shell: bash
-        env:
-          HYST_TAG: v1.3.5
-          ANDROID_API: "24"
         run: |
           set -euo pipefail
 
           bash script/bootstrap-engines.sh
 
-      # 13. VERIFY ENGINE FILES
+      # 13. VERIFY ENGINES
       - name: Validate VPN engines
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          REQUIRED_FILES=(
-            "app/libs/hev-socks5-tunnel.aar"
-
-            "app/src/main/jniLibs/arm64-v8a/libxray.so"
-            "app/src/main/jniLibs/arm64-v8a/libdnstt.so"
-            "app/src/main/jniLibs/arm64-v8a/libhysteria.so"
-
-            "app/src/main/jniLibs/x86_64/libxray.so"
-            "app/src/main/jniLibs/x86_64/libdnstt.so"
-            "app/src/main/jniLibs/x86_64/libhysteria.so"
-          )
-
-          for f in "${REQUIRED_FILES[@]}"; do
-            test -s "$f"
-            echo "OK: $f"
-          done
-
-      # 14. VERIFY ARCHITECTURES
-      - name: Verify Android architectures
         shell: bash
         run: |
           set -euo pipefail
@@ -211,16 +182,19 @@ jobs:
 
               FILE="app/src/main/jniLibs/$ABI/lib$ENGINE.so"
 
-              echo "Checking $FILE"
+              test -s "$FILE"
 
+              echo "Verified: $FILE"
               file "$FILE"
-              readelf -h "$FILE"
+              readelf -h "$FILE" >/dev/null
 
             done
           done
 
-      # 15. BUILD APK
-      - name: Build TOM TUNNEL APK
+          test -s app/libs/hev-socks5-tunnel.aar
+
+      # 14. BUILD APK
+      - name: Compile TOM TUNNEL APK
         shell: bash
         run: |
           set -euo pipefail
@@ -232,7 +206,7 @@ jobs:
             :app:clean \
             :app:assembleDebug
 
-      # 16. VERIFY APK
+      # 15. VERIFY APK
       - name: Verify APK
         shell: bash
         run: |
@@ -244,33 +218,27 @@ jobs:
 
           unzip -t "$APK" >/dev/null
 
-          echo "APK successfully generated."
-
           ls -lh "$APK"
 
-      # 17. PREPARE APK
+          "$ANDROID_HOME/build-tools/34.0.0/aapt" \
+            dump badging "$APK" | head -n 10
+
+      # 16. PREPARE RELEASE
       - name: Prepare APK
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION=$(sed -n \
-            's/.*versionName *= *"\([^"]*\)".*/\1/p' \
-            app/build.gradle.kts | head -n1)
-
-          VERSION="${VERSION:-dev}"
-
           mkdir -p release
 
           cp \
             app/build/outputs/apk/debug/app-debug.apk \
-            "release/TOM_TUNNEL-${VERSION}-debug.apk"
+            release/TOM-TUNNEL.apk
 
-          sha256sum release/*.apk > release/SHA256SUMS.txt
+          sha256sum release/TOM-TUNNEL.apk \
+            > release/SHA256SUMS.txt
 
-          ls -lh release/
-
-      # 18. UPLOAD ARTIFACT
+      # 17. UPLOAD
       - name: Upload TOM TUNNEL APK
         uses: actions/upload-artifact@v4
         with:
@@ -279,26 +247,26 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 19. PUBLISH RELEASE
+      # 18. PUBLISH
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
           files: release/*
+          generate_release_notes: true
 
-      # 20. BUILD SUMMARY
+      # 19. SUMMARY
       - name: Build summary
         if: always()
         shell: bash
         run: |
-          echo "=================================="
-          echo "       TOM TUNNEL APK"
-          echo "=================================="
-          echo "Java: 17"
-          echo "Go: 1.24"
-          echo "Gradle: 8.7"
-          echo "Android API: 34"
-          echo "Android NDK: 27.2.12479018"
-          echo "Hysteria: $HYST_TAG"
-          echo "=================================="
+          {
+            echo "## TOM TUNNEL BUILD"
+            echo ""
+            echo "- Java: 17"
+            echo "- DNSTT Go: 1.24"
+            echo "- Hysteria Go: 1.20.14"
+            echo "- Hysteria: $HYST_TAG"
+            echo "- Android API: 34"
+            echo "- NDK: 27.2.12479018"
+          } >> "$GITHUB_STEP_SUMMARY"
