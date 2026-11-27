@@ -24,10 +24,8 @@ jobs:
 
     env:
       JAVA_VERSION: '17'
-      GRADLE_VERSION: '8.7'
       ANDROID_API: '34'
       BUILD_TOOLS: '34.0.0'
-      XRAY_VERSION: '26.11.9'
       HYST_TAG: 'v1.3.5'
 
     steps:
@@ -35,91 +33,64 @@ jobs:
       # 1. Download project
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      # 2. Install Java 17
-      - name: Setup Java 17
+      # 2. Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Install Go
+      # 3. Go
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
 
-      # 4. Setup Android SDK
+      # 4. Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
         with:
           accept-android-sdk-licenses: true
           log-accepted-android-sdk-licenses: false
 
-      # 5. Install Android packages
-      # IMPORTANT: Do not use yes | sdkmanager --licenses
+      # 5. Android packages
       - name: Install Android packages
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Installing Android SDK..."
 
           sdkmanager --install \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0"
 
-          echo "Checking Android SDK..."
+          sdkmanager --licenses
 
-          test -d "$ANDROID_HOME/platforms/android-34"
-          test -d "$ANDROID_HOME/build-tools/34.0.0"
-          test -x "$ANDROID_HOME/platform-tools/adb"
-
-          echo "Android SDK successfully installed."
-
-      # 6. Install system dependencies
-      - name: Install build dependencies
-        shell: bash
+      # 6. Dependencies
+      - name: Install system dependencies
         run: |
-          set -euo pipefail
-
           sudo apt-get update
-
           sudo apt-get install -y \
-            curl \
-            unzip \
-            git \
-            zip \
-            file \
-            binutils \
-            build-essential \
-            ca-certificates \
-            python3
+            curl unzip git zip file binutils \
+            build-essential ca-certificates
 
-      # 7. Install Gradle
-      - name: Setup Gradle 8.7
+      # 7. Gradle
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
       # 8. Check environment
-      - name: Verify build environment
-        shell: bash
+      - name: Verify environment
         run: |
-          set -euo pipefail
-
+          set -e
           java -version
           go version
           gradle --version
           sdkmanager --version
-          adb version
 
-          echo "Build environment OK"
-
-      # 9. Check project
+      # 9. Verify source
       - name: Verify project structure
         shell: bash
         run: |
@@ -130,9 +101,9 @@ jobs:
           test -f app/build.gradle.kts
           test -f script/bootstrap-engines.sh
 
-          echo "Project structure verified"
+          echo "Project structure OK"
 
-      # 10. Repair bootstrap script
+      # 10. FIX CORRUPTED ENGINE SCRIPT
       - name: Repair bootstrap engines script
         shell: bash
         run: |
@@ -141,54 +112,47 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("script/bootstrap-engines.sh")
-          lines = path.read_text().splitlines()
+          p = Path("script/bootstrap-engines.sh")
+          lines = p.read_text().splitlines()
 
-          fixed = {
-              "ROOT": False,
-              "REL": False,
-              "XRAY": False,
-          }
+          fixed_root = False
+          fixed_rel = False
 
           for i, line in enumerate(lines):
 
               if line.startswith("ROOT="):
-                  lines[i] = (
-                      'ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"'
-                  )
-                  fixed["ROOT"] = True
+                  lines[i] = 'ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"'
+                  fixed_root = True
 
-              elif line.startswith("REL="):
-                  lines[i] = (
-                      'REL="${CLIENT_DIR#"$MOD_DIR"}"; REL="${REL#/}"'
-                  )
-                  fixed["REL"] = True
+              if line.startswith("REL="):
+                  lines[i] = 'REL="${CLIENT_DIR#"$MOD_DIR"}"; REL="${REL#/}"'
+                  fixed_rel = True
 
-              elif line.startswith("XRAY="):
-                  lines[i] = "XRAY=26.11.9"
-                  fixed["XRAY"] = True
-
-          missing = [key for key, value in fixed.items() if not value]
-
-          if missing:
+          if not fixed_root or not fixed_rel:
               raise SystemExit(
-                  "Required variables not found: " + ", ".join(missing)
+                  f"Cannot repair script safely: ROOT={fixed_root}, REL={fixed_rel}"
               )
 
-          path.write_text("\n".join(lines) + "\n")
-
-          print("ROOT corrected")
-          print("REL corrected")
-          print("XRAY updated to 26.11.9")
+          p.write_text("\n".join(lines) + "\n")
+          print("ROOT and REL syntax repaired.")
           PY
 
           chmod +x script/bootstrap-engines.sh
 
           bash -n script/bootstrap-engines.sh
 
-          echo "Bootstrap script syntax verified"
+          echo "Bootstrap script syntax OK"
 
-      # 11. Cache Go modules
+      # 11. Prepare directories
+      - name: Prepare engine directories
+        run: |
+          set -euo pipefail
+
+          mkdir -p app/libs
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          mkdir -p app/src/main/jniLibs/x86_64
+
+      # 12. Cache Go modules
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
@@ -197,30 +161,19 @@ jobs:
           restore-keys: |
             tom-go-${{ runner.os }}-
 
-      # 12. Prepare directories
-      - name: Prepare engine directories
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p app/libs
-          mkdir -p app/src/main/jniLibs/arm64-v8a
-          mkdir -p app/src/main/jniLibs/x86_64
-
-      # 13. Build native engines
+      # 13. Compile engines
       - name: Build VPN native engines
         shell: bash
         run: |
           set -euo pipefail
 
-          export XRAY_VERSION="$XRAY_VERSION"
-          export HYST_TAG="$HYST_TAG"
+          export HYST_TAG="v1.3.5"
 
           bash -n script/bootstrap-engines.sh
 
           bash script/bootstrap-engines.sh
 
-      # 14. Validate native engines
+      # 14. Validate engines
       - name: Validate VPN engines
         shell: bash
         run: |
@@ -239,10 +192,10 @@ jobs:
           )
 
           for f in "${FILES[@]}"; do
-            if [ ! -s "$f" ]; then
-              echo "ERROR: Missing engine: $f"
+            test -s "$f" || {
+              echo "Missing engine: $f"
               exit 1
-            fi
+            }
 
             echo "OK: $f"
           done
@@ -263,42 +216,47 @@ jobs:
               file "$FILE"
               readelf -h "$FILE" >/dev/null
 
-              echo "Validated $FILE"
-
             done
           done
 
-      # 16. Build APK
+      # 16. Compile APK
       - name: Build TOM TUNNEL APK
         shell: bash
         run: |
           set -euo pipefail
 
-          gradle \
-            --no-daemon \
-            --stacktrace \
-            --max-workers=2 \
-            :app:clean \
-            :app:assembleDebug
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+
+            ./gradlew \
+              --no-daemon \
+              --stacktrace \
+              --max-workers=2 \
+              :app:clean \
+              :app:assembleDebug
+          else
+            gradle \
+              --no-daemon \
+              --stacktrace \
+              --max-workers=2 \
+              :app:clean \
+              :app:assembleDebug
+          fi
 
       # 17. Verify APK
-      - name: Verify generated APK
+      - name: Verify APK
         shell: bash
         run: |
           set -euo pipefail
 
           APK="app/build/outputs/apk/debug/app-debug.apk"
 
-          if [ ! -s "$APK" ]; then
-            echo "ERROR: APK was not generated"
-            exit 1
-          fi
-
+          test -s "$APK"
           unzip -t "$APK"
 
-          echo "APK successfully generated"
+          echo "APK compilation successful"
 
-      # 18. Prepare APK
+      # 18. Rename APK
       - name: Prepare APK
         shell: bash
         run: |
@@ -325,7 +283,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 20. Publish release
+      # 20. Release
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
@@ -333,17 +291,14 @@ jobs:
           generate_release_notes: true
           files: TOM_TUNNEL-*-debug.apk
 
-      # 21. Build report
+      # 21. Summary
       - name: Build summary
         if: always()
-        shell: bash
         run: |
-          echo "===================================="
-          echo "       TOM TUNNEL BUILD REPORT"
-          echo "===================================="
-          echo "Java: $JAVA_VERSION"
-          echo "Gradle: $GRADLE_VERSION"
-          echo "Android API: $ANDROID_API"
-          echo "Xray: $XRAY_VERSION"
+          echo "================================"
+          echo "       TOM TUNNEL BUILD"
+          echo "================================"
+          echo "Java: 17"
+          echo "Android API: 34"
           echo "Hysteria: $HYST_TAG"
-          echo "===================================="
+          echo "================================"
