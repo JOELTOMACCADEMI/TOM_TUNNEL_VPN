@@ -20,10 +20,9 @@ jobs:
     name: Compile TOM TUNNEL Android
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-
     env:
       HYST_TAG: v1.3.5
-      ANDROID_API: "24"
+      ANDROID_API: "29"
       XRAY_VERSION: "26.11.9"
 
     steps:
@@ -38,7 +37,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Go 1.24
+      - name: Set up Go 1.24 for DNSTT
         uses: actions/setup-go@v5
         with:
           go-version: "1.24.x"
@@ -60,13 +59,13 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
           test -d "$ANDROID_HOME/ndk/27.2.12479018"
 
-      - name: Install Go 1.20.14 for Hysteria
+      - name: Install Go 1.20.14 for Hysteria v1
         shell: bash
         run: |
           set -Eeuo pipefail
           GO_DIR="$RUNNER_TEMP/go1.20.14"
           mkdir -p "$GO_DIR"
-          curl -fL --retry 5 --retry-all-errors \
+          curl -fL --retry 5 --retry-all-errors --retry-delay 3 \
             https://go.dev/dl/go1.20.14.linux-amd64.tar.gz \
             -o "$RUNNER_TEMP/go1.20.14.tar.gz"
           tar -xzf "$RUNNER_TEMP/go1.20.14.tar.gz" \
@@ -86,7 +85,71 @@ jobs:
           set -Eeuo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            curl git jq unzip zip file binutils build-essential
+            curl git jq unzip zip file binutils build-essential python3
+
+      - name: Align Android minSdk and Gradle properties
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path("app/build.gradle.kts")
+          s = p.read_text(encoding="utf-8")
+          s2, count = re.subn(
+              r'(?m)^(\s*minSdk\s*=\s*)24(\s*(?://.*)?$)',
+              r'\g<1>29\g<2>', s)
+          if count == 0 and not re.search(r'(?m)^\s*minSdk\s*=\s*29\b', s):
+              raise SystemExit("minSdk = 24/29 introuvable dans app/build.gradle.kts")
+          p.write_text(s2, encoding="utf-8")
+          print("minSdk Android aligné sur 29")
+          PY
+          touch gradle.properties
+          if grep -qE '^android\.useAndroidX=' gradle.properties; then
+            sed -i 's/^android\.useAndroidX=.*/android.useAndroidX=true/' gradle.properties
+          else
+            printf '\nandroid.useAndroidX=true\n' >> gradle.properties
+          fi
+          if ! grep -qE '^android\.enableJetifier=' gradle.properties; then
+            printf 'android.enableJetifier=true\n' >> gradle.properties
+          fi
+          grep -E '^android\.(useAndroidX|enableJetifier)=' gradle.properties
+          grep -n 'minSdk' app/build.gradle.kts
+
+      # Authentifie les téléchargements GitHub effectués par le script natif.
+      - name: Enable authenticated GitHub downloads in engine bootstrap
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path("script/bootstrap-engines.sh")
+          s = p.read_text(encoding="utf-8")
+          replacement = r'''download() {
+            local url="$1"
+            local output="$2"
+            local -a auth_args=()
+            echo "Downloading: $url"
+            if [[ "$url" == *github.com/* ]] && [[ -n "${GITHUB_TOKEN:-}" ]]; then
+              auth_args=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+            fi
+            curl -fL \
+              --retry 5 \
+              --retry-all-errors \
+              --retry-delay 3 \
+              --connect-timeout 30 \
+              --max-time 600 \
+              "${auth_args[@]}" \
+              "$url" -o "$output"
+            test -s "$output"
+          }'''
+          s2, count = re.subn(r'(?ms)^download\(\) \{.*?^\}', lambda _match: replacement, s, count=1)
+          if count != 1:
+              raise SystemExit("Fonction download() introuvable dans bootstrap-engines.sh")
+          p.write_text(s2, encoding="utf-8")
+          PY
+          chmod +x script/bootstrap-engines.sh
 
       - name: Verify build environment
         shell: bash
@@ -107,12 +170,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p app/libs
-          mkdir -p app/src/main/jniLibs/arm64-v8a
-          mkdir -p app/src/main/jniLibs/x86_64
+          mkdir -p app/libs app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/x86_64
           chmod +x script/bootstrap-engines.sh
 
-      # GITHUB_TOKEN réduit les refus 403 dus aux limites de l'API GitHub.
       - name: Build Xray, DNSTT, Hysteria and HEV engines
         shell: bash
         env:
@@ -137,33 +197,30 @@ jobs:
           test -s app/libs/hev-socks5-tunnel.aar
           unzip -t app/libs/hev-socks5-tunnel.aar >/dev/null
 
-      - name: Enable AndroidX
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          touch gradle.properties
-          if grep -qE '^android\.useAndroidX=' gradle.properties; then
-            sed -i 's/^android\.useAndroidX=.*/android.useAndroidX=true/' gradle.properties
-          else
-            printf '\nandroid.useAndroidX=true\n' >> gradle.properties
-          fi
-          if ! grep -qE '^android\.enableJetifier=' gradle.properties; then
-            printf 'android.enableJetifier=true\n' >> gradle.properties
-          fi
-          grep -E '^android\.(useAndroidX|enableJetifier)=' gradle.properties
-
       - name: Compile TOM TUNNEL debug APK
         shell: bash
         run: |
           set -Eeuo pipefail
+          set +e
           gradle \
             --no-daemon \
+            --console=plain \
             --stacktrace \
             --info \
+            --warning-mode=all \
             --max-workers=2 \
             --no-build-cache \
             :app:clean \
-            :app:assembleDebug
+            :app:assembleDebug 2>&1 | tee "$RUNNER_TEMP/tom-tunnel-gradle.log"
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== Kotlin / Gradle errors ====="
+            grep -n -E '(^e: |^w: |Compilation error|What went wrong:|Execution failed for task|Could not resolve|Could not find)' \
+              "$RUNNER_TEMP/tom-tunnel-gradle.log" | tail -n 220 || true
+            echo "===== End diagnostics ====="
+            exit "$BUILD_STATUS"
+          fi
 
       - name: Verify generated APK
         shell: bash
@@ -203,6 +260,7 @@ jobs:
           path: |
             app/build/reports/
             app/build/test-results/
+            ${{ runner.temp }}/tom-tunnel-gradle.log
           if-no-files-found: ignore
           retention-days: 7
 
@@ -219,6 +277,7 @@ jobs:
             echo "- Hysteria Go: 1.20.14"
             echo "- Hysteria tag: $HYST_TAG"
             echo "- Xray: $XRAY_VERSION"
-            echo "- Android API: 34"
+            echo "- Android compileSdk: 34"
+            echo "- Android minSdk: 29"
             echo "- NDK: 27.2.12479018"
           } >> "$GITHUB_STEP_SUMMARY"
