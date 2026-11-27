@@ -20,9 +20,10 @@ jobs:
     name: Compile TOM TUNNEL Android
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+
     env:
       HYST_TAG: v1.3.5
-      ANDROID_API: "29"
+      ANDROID_API: "24"
       XRAY_VERSION: "26.11.9"
 
     steps:
@@ -37,7 +38,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Go 1.24 for DNSTT
+      - name: Set up Go 1.24
         uses: actions/setup-go@v5
         with:
           go-version: "1.24.x"
@@ -59,13 +60,13 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
           test -d "$ANDROID_HOME/ndk/27.2.12479018"
 
-      - name: Install Go 1.20.14 for Hysteria v1
+      - name: Install Go 1.20.14 for Hysteria
         shell: bash
         run: |
           set -Eeuo pipefail
           GO_DIR="$RUNNER_TEMP/go1.20.14"
           mkdir -p "$GO_DIR"
-          curl -fL --retry 5 --retry-all-errors --retry-delay 3 \
+          curl -fL --retry 5 --retry-all-errors \
             https://go.dev/dl/go1.20.14.linux-amd64.tar.gz \
             -o "$RUNNER_TEMP/go1.20.14.tar.gz"
           tar -xzf "$RUNNER_TEMP/go1.20.14.tar.gz" \
@@ -85,71 +86,7 @@ jobs:
           set -Eeuo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            curl git jq unzip zip file binutils build-essential python3
-
-      - name: Align Android minSdk and Gradle properties
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          p = Path("app/build.gradle.kts")
-          s = p.read_text(encoding="utf-8")
-          s2, count = re.subn(
-              r'(?m)^(\s*minSdk\s*=\s*)24(\s*(?://.*)?$)',
-              r'\g<1>29\g<2>', s)
-          if count == 0 and not re.search(r'(?m)^\s*minSdk\s*=\s*29\b', s):
-              raise SystemExit("minSdk = 24/29 introuvable dans app/build.gradle.kts")
-          p.write_text(s2, encoding="utf-8")
-          print("minSdk Android aligné sur 29")
-          PY
-          touch gradle.properties
-          if grep -qE '^android\.useAndroidX=' gradle.properties; then
-            sed -i 's/^android\.useAndroidX=.*/android.useAndroidX=true/' gradle.properties
-          else
-            printf '\nandroid.useAndroidX=true\n' >> gradle.properties
-          fi
-          if ! grep -qE '^android\.enableJetifier=' gradle.properties; then
-            printf 'android.enableJetifier=true\n' >> gradle.properties
-          fi
-          grep -E '^android\.(useAndroidX|enableJetifier)=' gradle.properties
-          grep -n 'minSdk' app/build.gradle.kts
-
-      # Authentifie les téléchargements GitHub effectués par le script natif.
-      - name: Enable authenticated GitHub downloads in engine bootstrap
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          p = Path("script/bootstrap-engines.sh")
-          s = p.read_text(encoding="utf-8")
-          replacement = r'''download() {
-            local url="$1"
-            local output="$2"
-            local -a auth_args=()
-            echo "Downloading: $url"
-            if [[ "$url" == *github.com/* ]] && [[ -n "${GITHUB_TOKEN:-}" ]]; then
-              auth_args=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
-            fi
-            curl -fL \
-              --retry 5 \
-              --retry-all-errors \
-              --retry-delay 3 \
-              --connect-timeout 30 \
-              --max-time 600 \
-              "${auth_args[@]}" \
-              "$url" -o "$output"
-            test -s "$output"
-          }'''
-          s2, count = re.subn(r'(?ms)^download\(\) \{.*?^\}', lambda _match: replacement, s, count=1)
-          if count != 1:
-              raise SystemExit("Fonction download() introuvable dans bootstrap-engines.sh")
-          p.write_text(s2, encoding="utf-8")
-          PY
-          chmod +x script/bootstrap-engines.sh
+            curl git jq unzip zip file binutils build-essential
 
       - name: Verify build environment
         shell: bash
@@ -170,16 +107,107 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p app/libs app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/x86_64
+          mkdir -p app/libs
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          mkdir -p app/src/main/jniLibs/x86_64
           chmod +x script/bootstrap-engines.sh
 
       - name: Build Xray, DNSTT, Hysteria and HEV engines
         shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
           bash script/bootstrap-engines.sh
+
+      # Le code Kotlin actuel appelle socksProbe() depuis TomVpnService
+      # et HysteriaEngine, mais cette fonction n'existe pas dans Engine.kt.
+      # On ajoute son implémentation uniquement si le dépôt ne la contient pas déjà.
+      - name: Ensure SOCKS5 connectivity probe exists
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SRC="app/src/main/java/com/tomtunnel/app/engine"
+          mkdir -p "$SRC"
+          if ! grep -R --include='*.kt' -qE 'fun[[:space:]]+socksProbe[[:space:]]*\(' app/src/main/java; then
+            cat > "$SRC/SocksProbe.kt" <<'KOTLIN'
+          package com.tomtunnel.app.engine
+
+          import java.io.DataInputStream
+          import java.io.DataOutputStream
+          import java.net.InetAddress
+          import java.net.Socket
+
+          /**
+           * Vérifie qu'un proxy SOCKS5 local accepte une commande CONNECT
+           * et peut établir une connexion TCP vers la destination demandée.
+           */
+          internal fun socksProbe(
+              socksPort: Int,
+              targetHost: String,
+              targetPort: Int,
+              timeoutMs: Int = 5000
+          ): Boolean {
+              return try {
+                  Socket().use { socket ->
+                      socket.connect(java.net.InetSocketAddress("127.0.0.1", socksPort), timeoutMs)
+                      socket.soTimeout = timeoutMs
+                      val input = DataInputStream(socket.getInputStream())
+                      val output = DataOutputStream(socket.getOutputStream())
+
+                      // Négociation SOCKS5 sans authentification.
+                      output.write(byteArrayOf(0x05, 0x01, 0x00))
+                      output.flush()
+                      if (input.readUnsignedByte() != 0x05 || input.readUnsignedByte() != 0x00) {
+                          return false
+                      }
+
+                      // Requête CONNECT : adresse IPv4/IPv6 ou nom DNS.
+                      val address = try {
+                          InetAddress.getByName(targetHost)
+                      } catch (_: Throwable) {
+                          null
+                      }
+
+                      if (address != null && address.address.size == 4) {
+                          output.write(byteArrayOf(0x05, 0x01, 0x00, 0x01))
+                          output.write(address.address)
+                      } else if (address != null && address.address.size == 16) {
+                          output.write(byteArrayOf(0x05, 0x01, 0x00, 0x04))
+                          output.write(address.address)
+                      } else {
+                          val hostBytes = targetHost.toByteArray(Charsets.UTF_8)
+                          require(hostBytes.size in 1..255)
+                          output.write(byteArrayOf(0x05, 0x01, 0x00, 0x03, hostBytes.size.toByte()))
+                          output.write(hostBytes)
+                      }
+                      output.write((targetPort ushr 8) and 0xff)
+                      output.write(targetPort and 0xff)
+                      output.flush()
+
+                      val version = input.readUnsignedByte()
+                      val reply = input.readUnsignedByte()
+                      input.readUnsignedByte() // RSV
+                      val addressType = input.readUnsignedByte()
+
+                      when (addressType) {
+                          0x01 -> input.readFully(ByteArray(4))
+                          0x04 -> input.readFully(ByteArray(16))
+                          0x03 -> {
+                              val length = input.readUnsignedByte()
+                              input.readFully(ByteArray(length))
+                          }
+                          else -> return false
+                      }
+                      input.readFully(ByteArray(2)) // Port de sortie
+
+                      version == 0x05 && reply == 0x00
+                  }
+              } catch (_: Throwable) {
+                  false
+              }
+          }
+          KOTLIN
+          fi
+          grep -R --include='*.kt' -nE 'fun[[:space:]]+socksProbe[[:space:]]*\(' app/src/main/java
 
       - name: Verify native engines and architectures
         shell: bash
@@ -197,30 +225,33 @@ jobs:
           test -s app/libs/hev-socks5-tunnel.aar
           unzip -t app/libs/hev-socks5-tunnel.aar >/dev/null
 
+      - name: Enable AndroidX
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          touch gradle.properties
+          if grep -qE '^android\.useAndroidX=' gradle.properties; then
+            sed -i 's/^android\.useAndroidX=.*/android.useAndroidX=true/' gradle.properties
+          else
+            printf '\nandroid.useAndroidX=true\n' >> gradle.properties
+          fi
+          if ! grep -qE '^android\.enableJetifier=' gradle.properties; then
+            printf 'android.enableJetifier=true\n' >> gradle.properties
+          fi
+          grep -E '^android\.(useAndroidX|enableJetifier)=' gradle.properties
+
       - name: Compile TOM TUNNEL debug APK
         shell: bash
         run: |
           set -Eeuo pipefail
-          set +e
           gradle \
             --no-daemon \
-            --console=plain \
             --stacktrace \
             --info \
-            --warning-mode=all \
             --max-workers=2 \
             --no-build-cache \
             :app:clean \
-            :app:assembleDebug 2>&1 | tee "$RUNNER_TEMP/tom-tunnel-gradle.log"
-          BUILD_STATUS=${PIPESTATUS[0]}
-          set -e
-          if [ "$BUILD_STATUS" -ne 0 ]; then
-            echo "===== Kotlin / Gradle errors ====="
-            grep -n -E '(^e: |^w: |Compilation error|What went wrong:|Execution failed for task|Could not resolve|Could not find)' \
-              "$RUNNER_TEMP/tom-tunnel-gradle.log" | tail -n 220 || true
-            echo "===== End diagnostics ====="
-            exit "$BUILD_STATUS"
-          fi
+            :app:assembleDebug
 
       - name: Verify generated APK
         shell: bash
@@ -230,8 +261,7 @@ jobs:
           test -s "$APK"
           unzip -t "$APK" >/dev/null
           mkdir -p release
-          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" \
-            > release/apk-badging.txt
+          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" > release/apk-badging.txt
           sed -n '1,12p' release/apk-badging.txt
           cp "$APK" "release/TOM-TUNNEL-${GITHUB_SHA::7}-debug.apk"
           sha256sum release/*.apk > release/SHA256SUMS.txt
@@ -260,7 +290,6 @@ jobs:
           path: |
             app/build/reports/
             app/build/test-results/
-            ${{ runner.temp }}/tom-tunnel-gradle.log
           if-no-files-found: ignore
           retention-days: 7
 
@@ -277,7 +306,6 @@ jobs:
             echo "- Hysteria Go: 1.20.14"
             echo "- Hysteria tag: $HYST_TAG"
             echo "- Xray: $XRAY_VERSION"
-            echo "- Android compileSdk: 34"
-            echo "- Android minSdk: 29"
+            echo "- Android API: 34"
             echo "- NDK: 27.2.12479018"
           } >> "$GITHUB_STEP_SUMMARY"
