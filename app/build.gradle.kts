@@ -9,11 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.tomtunnel.app"
-
-        // HEV SOCKS5 Tunnel AAR 2.18.0 déclare minSdkVersion 29.
-        // L'application doit donc également cibler au minimum Android 10.
         minSdk = 29
-
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
