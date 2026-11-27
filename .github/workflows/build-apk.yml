@@ -8,21 +8,23 @@ on:
       - master
     tags:
       - 'v*'
+
   pull_request:
     branches:
       - main
       - master
+
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: tom-tunnel-build-${{ github.ref }}
+  group: tom-tunnel-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
+  build-apk:
     name: Compile TOM TUNNEL Android
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -31,98 +33,73 @@ jobs:
       JAVA_VERSION: '17'
       GRADLE_VERSION: '8.7'
       ANDROID_API: '34'
-      ANDROID_BUILD_TOOLS: '34.0.0'
-      XRAY_VERSION: '26.11.9'
-      HYSTERIA_VERSION: 'v1.3.5'
+      BUILD_TOOLS: '34.0.0'
+      HYST_TAG: 'v1.3.5'
 
     steps:
-      # 1. Télécharger le projet
-      - name: Checkout source
+
+      # 1. Download source code
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      # 2. Vérifier la structure du projet
-      - name: Verify project structure
+      # 2. Verify project
+      - name: Verify project files
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
           test -f settings.gradle.kts
           test -f build.gradle.kts
           test -f app/build.gradle.kts
           test -f script/bootstrap-engines.sh
-          test -d app/src/main
 
-          echo "Project structure verified."
+          echo "Project structure OK"
 
-      # 3. Installer Java 17
+      # 3. Install Java 17
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # 4. Installer Go
+      # 4. Install Go
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
-          cache: false
 
-      # 5. Installer Android SDK
+      # 5. Setup Android SDK
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '15859902'
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
 
-      # 6. Installer les composants Android
-      - name: Install Android SDK packages
+      # 6. Verify Android SDK
+      - name: Verify Android environment
         shell: bash
         run: |
-          set -e
-          yes | sdkmanager --licenses >/dev/null || true
+          set -euo pipefail
 
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
-      # 7. Installer Gradle compatible
-      - name: Setup Gradle 8.7
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
-          cache-cleanup: always
-
-      # 8. Vérifier les versions
-      - name: Check build environment
-        run: |
           java -version
           go version
-          gradle --version
+          sdkmanager --version
           adb version
-          sdkmanager --list_installed
 
-      # 9. Corriger la version Xray utilisée par le bootstrap
-      - name: Configure Xray engine version
-        shell: bash
-        run: |
-          set -e
-          sed -i \
-            "s/^XRAY=.*/XRAY=${XRAY_VERSION}/" \
-            script/bootstrap-engines.sh
+          test -d "$ANDROID_HOME/platforms/android-34"
+          test -d "$ANDROID_HOME/build-tools/34.0.0"
 
-          grep '^XRAY=' script/bootstrap-engines.sh
+          echo "Android environment OK"
 
-      # 10. Restaurer les moteurs déjà compilés
-      - name: Cache native engines
-        uses: actions/cache@v4
-        with:
-          path: |
-            app/libs
-            app/src/main/jniLibs
-          key: tom-engines-${{ runner.os }}-xray-${{ env.XRAY_VERSION }}-hysteria-${{ env.HYSTERIA_VERSION }}-${{ hashFiles('script/bootstrap-engines.sh') }}
-
-      # 11. Installer les outils nécessaires
-      - name: Install native build dependencies
+      # 7. Install native build dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -132,22 +109,54 @@ jobs:
             zip \
             file \
             binutils \
-            ca-certificates \
-            build-essential
+            build-essential \
+            ca-certificates
 
-      # 12. Télécharger et compiler les moteurs VPN
+      # 8. Setup Gradle
+      - name: Setup Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      # 9. Verify Gradle
+      - name: Verify Gradle
+        run: |
+          gradle --version
+
+      # 10. Cache Go modules
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: tom-go-${{ runner.os }}-${{ hashFiles('script/bootstrap-engines.sh') }}
+          restore-keys: |
+            tom-go-${{ runner.os }}-
+
+      # 11. Prepare native engines
+      - name: Prepare engine environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p app/libs
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          mkdir -p app/src/main/jniLibs/x86_64
+
+          chmod +x script/bootstrap-engines.sh
+
+          go env
+
+      # 12. Download and compile VPN engines
       - name: Build VPN native engines
         shell: bash
         run: |
           set -euo pipefail
 
-          chmod +x script/bootstrap-engines.sh
-
-          export HYST_TAG="${HYSTERIA_VERSION}"
+          export HYST_TAG="${HYST_TAG}"
 
           bash script/bootstrap-engines.sh
 
-      # 13. Vérifier les moteurs obligatoires
+      # 13. Validate native engines
       - name: Validate VPN engines
         shell: bash
         run: |
@@ -165,19 +174,18 @@ jobs:
             "app/src/main/jniLibs/x86_64/libhysteria.so"
           )
 
-          for FILE in "${REQUIRED_FILES[@]}"; do
-            if [ ! -s "$FILE" ]; then
-              echo "ERROR: Missing engine: $FILE"
+          for f in "${REQUIRED_FILES[@]}"; do
+            if [ ! -s "$f" ]; then
+              echo "ERROR: Missing file: $f"
               exit 1
             fi
-            echo "OK: $FILE"
+
+            echo "OK: $f"
           done
 
           unzip -t app/libs/hev-socks5-tunnel.aar
 
-          echo "All required engine files are present."
-
-      # 14. Vérifier les architectures ELF
+      # 14. Validate CPU architectures
       - name: Validate native architectures
         shell: bash
         run: |
@@ -185,17 +193,19 @@ jobs:
 
           for ABI in arm64-v8a x86_64; do
             for ENGINE in xray dnstt hysteria; do
+
               FILE="app/src/main/jniLibs/${ABI}/lib${ENGINE}.so"
 
-              file "$FILE"
-              readelf -h "$FILE" >/dev/null
+              echo "Checking $FILE"
 
-              echo "Validated: $FILE"
+              file "$FILE"
+              readelf -h "$FILE"
+
             done
           done
 
-      # 15. Compiler APK Debug et Release
-      - name: Build Android APK
+      # 15. Compile Android APK
+      - name: Build TOM TUNNEL APK
         shell: bash
         run: |
           set -euo pipefail
@@ -205,11 +215,27 @@ jobs:
             --stacktrace \
             --max-workers=2 \
             :app:clean \
-            :app:assembleDebug \
-            :app:assembleRelease
+            :app:assembleDebug
 
-      # 16. Vérifier et renommer les APK
-      - name: Verify and prepare APK files
+      # 16. Verify generated APK
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: APK not generated"
+            exit 1
+          fi
+
+          unzip -t "$APK"
+
+          echo "APK successfully generated"
+
+      # 17. Rename APK
+      - name: Prepare APK
         shell: bash
         run: |
           set -euo pipefail
@@ -220,54 +246,39 @@ jobs:
 
           VERSION="${VERSION:-dev}"
 
-          DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
-          RELEASE_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
-
-          test -s "$DEBUG_APK"
-          test -s "$RELEASE_APK"
-
-          unzip -t "$DEBUG_APK"
-          unzip -t "$RELEASE_APK"
-
-          cp "$DEBUG_APK" "TOM_TUNNEL-${VERSION}-debug.apk"
-          cp "$RELEASE_APK" "TOM_TUNNEL-${VERSION}-release-unsigned.apk"
-
-          echo "APK_VERSION=$VERSION" >> "$GITHUB_ENV"
+          cp \
+            app/build/outputs/apk/debug/app-debug.apk \
+            "TOM_TUNNEL-${VERSION}-debug.apk"
 
           ls -lh TOM_TUNNEL-*.apk
 
-      # 17. Publier les APK dans les artefacts
-      - name: Upload APK artifacts
+      # 18. Upload APK
+      - name: Upload TOM TUNNEL APK
         uses: actions/upload-artifact@v4
         with:
-          name: TOM-TUNNEL-APK-${{ env.APK_VERSION }}
-          path: |
-            TOM_TUNNEL-*-debug.apk
-            TOM_TUNNEL-*-release-unsigned.apk
+          name: TOM-TUNNEL-APK
+          path: TOM_TUNNEL-*-debug.apk
           if-no-files-found: error
           retention-days: 30
 
-      # 18. Publier automatiquement une Release GitHub
-      - name: Publish GitHub Release
+      # 19. Publish GitHub Release
+      - name: Publish Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          name: TOM TUNNEL ${{ github.ref_name }}
           generate_release_notes: true
-          files: |
-            TOM_TUNNEL-*-debug.apk
-            TOM_TUNNEL-*-release-unsigned.apk
+          files: TOM_TUNNEL-*-debug.apk
 
-      # 19. Informations de compilation
+      # 20. Build report
       - name: Build summary
         if: always()
+        shell: bash
         run: |
           echo "=================================="
-          echo "       TOM TUNNEL BUILD"
+          echo "       TOM TUNNEL APK"
           echo "=================================="
           echo "Java: 17"
           echo "Gradle: 8.7"
-          echo "Android SDK: 34"
-          echo "Xray: $XRAY_VERSION"
-          echo "Hysteria: $HYSTERIA_VERSION"
+          echo "Android API: 34"
+          echo "Hysteria: ${HYST_TAG}"
           echo "=================================="
