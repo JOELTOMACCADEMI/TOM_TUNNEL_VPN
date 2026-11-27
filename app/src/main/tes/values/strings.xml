@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">TOM_TUNNEL</string>
-    <!-- Backend quotas / clés (HTTPS). Modifiable dans Token > URL du backend. -->
-    <string name="api_base">https://api.tomtunnel.com/v1</string>
-</resources>
