@@ -1,98 +1,53 @@
-# TOM_TUNNEL Android 1.5.6
+# TOM TUNNEL Android 1.0.0
 
-**TOM_TUNNEL — By JOELTOM** est un client VPN Android natif (interface WebView + moteurs Kotlin et exécutables natifs).
+Client VPN Android (interface HTML dans une WebView + moteurs natifs). Développeur : JOELTOM.
 
- 
-## Compatibilité Android
+## Protocoles pris en charge
 
-- Version minimale configurée : **Android 6.0 (API 23)**.
-- Compatible avec les versions Android plus récentes, sous réserve des restrictions propres à chaque fabricant et version.
-- Architecture actuellement fournie : **ARM64 (arm64-v8a) et x86_64**.
-- Les appareils Android 32 bits uniquement (armeabi-v7a / armeabi) ne sont pas encore pris en charge, car les moteurs natifs correspondants ne sont pas fournis.
-- Android 5.x et antérieur ne sont pas garantis.
-- La notification VPN utilise maintenant une construction compatible avec Android 6/7 et les canaux de notification uniquement sur Android 8+.
+| Profil de l'interface | Moteur | Notes |
+|---|---|---|
+| VLESS, VMess, Trojan, Shadowsocks | Xray (V2Ray) | TCP, WS, gRPC, H2 ; TLS et Reality |
+| SSH SlowDNS | DNSTT + JSch | NS + clé publique DNSTT, puis SSH |
+| SSH WebSocket | JSch | TLS (WSS) optionnel, SNI, Host, Path, payload |
+| SSH TCP | JSch | Direct, Direct+Payload, HTTP Proxy(+Payload), SSL/SNI(+Payload), SSL/TLS Proxy |
+| UDP | Hysteria v1 | Serveur compatible ZIVPN : mot de passe, port 5667 ou plage 6000-19999 |
 
-« Toutes les versions Android » ne peut donc pas être garanti avec les moteurs binaires actuels. Pour couvrir aussi les anciens téléphones 32 bits, il faudra compiler et tester séparément Xray, DNSTT, Hysteria et le moteur TUN pour ARMv7.
+Non pris en charge dans cette version : WireGuard et SOCKS (le service affiche une erreur claire).
 
-## Familles de moteurs
+Chaîne : moteur → proxy SOCKS5 local `127.0.0.1:10808` → hev-socks5-tunnel (TUN).
 
-- **SSH** : TCP direct, payload HTTP, proxy HTTP CONNECT, TLS/SNI, WebSocket/WSS et SlowDNS/DNSTT.
-- **Xray** : VLESS, VMess, Trojan, Shadowsocks, SOCKS5 et WireGuard ; option Xray via SlowDNS/DNSTT pour les profils TCP compatibles.
-- **Transports Xray récents** : RAW/TCP, WebSocket, gRPC, HTTPUpgrade, XHTTP et mKCP, avec TLS ou REALITY lorsque la combinaison est prise en charge par Xray.
-- **UDP dédié** : client Hysteria v1 avec option d'obfuscation `zivpn` ; la compatibilité doit être validée avec le serveur UDP utilisé.
-- **TUN Android** : hev-socks5-tunnel raccorde l'interface VPN au proxy local.
-
-Les modes propriétaires OSSH/Meek/Tapdance/Conjure de ZIVPN ne sont pas déclarés disponibles : l'APK de référence ne fournit pas leur code source ni leurs contrats techniques complets.
-
-## Identité
-
-| Élément | Valeur |
-|---|---|
-| Nom | TOM_TUNNEL |
-| Package | `com.tomtunnel.app` |
-| Développeur | By JOELTOM |
-| Version | 1.5.5 |
-| Canal Telegram | https://t.me/tomtunnel |
-
-## Compilation des moteurs natifs
-
-Depuis la racine du dépôt :
+## Compiler (Termux ou PC)
 
 ```bash
-chmod +x script/bootstrap-engines.sh
-./script/bootstrap-engines.sh
-gradle :app:assembleDebug
+chmod +x build-termux.sh scripts/bootstrap-engines.sh
+./build-termux.sh      # télécharge/compile les moteurs s'ils manquent, puis assemble l'APK
 ```
 
-Le bootstrap prépare Xray, hev-socks5-tunnel, DNSTT et Hysteria pour `arm64-v8a` et `x86_64`. Les binaires natifs ne sont pas inclus dans l'archive source ; ils sont téléchargés pendant cette étape.
+Prérequis du bootstrap : `curl unzip git go`. Il récupère Xray et l'AAR hev, et compile DNSTT et
+Hysteria v1 (tag `v1.3.5`, modifiable avec `HYST_TAG=...`) pour arm64-v8a et x86_64.
 
-Sur Termux ARM64, utiliser :
+## Notes techniques
 
-```bash
-bash build-termux.sh
-```
+- Identifiant d'application : `com.tomtunnel.app` (différent de l'ancien JephTunnel : les deux peuvent coexister).
+- Pont JavaScript `JT` : connect, disconnect, testUdp, techInfo, getDeviceId, resetHostKeys, clearCache, saveState, copyText, readClipboard, shareText, openUrl, refreshIp (+ saveFile, shareFile conservés).
+- Clés d'hôte SSH : acceptées à la première connexion puis vérifiées. Si la clé change, la connexion est refusée avec un message explicite ; « Réinitialiser les clés d'hôte SSH » (paramètres) efface `known_hosts`.
+- Algorithmes SSH : modernes d'abord ; les anciens (diffie-hellman-group1/14-sha1, ssh-rsa/ssh-dss, CBC) ne sont activés que si le serveur refuse la négociation moderne (nouvel essai automatique, noté dans `ssh.log`).
+- Reconnexion automatique : si le moteur tombe, jusqu'à 5 tentatives avec délai croissant.
+- Par SSH, seul le DNS (UDP/53) est relayé en DNS-over-TCP ; UDPGW n'est pas implémenté. Le profil UDP (Hysteria) relaie lui l'UDP complet.
+- SSH WebSocket : après la réponse `101`, le flux est traité comme un tunnel brut (proxys SSH-over-WebSocket usuels), sans trames RFC 6455.
+- TLS (SSL/SNI, WSS) : TLS 1.2/1.3 uniquement. Le certificat est vérifié (chaîne du système + nom = SNI). Il n'est pas vérifié si le profil contient `verifyCert:false`, ou, à défaut de ce champ, si un SNI personnalisé différent de l'hôte est utilisé (cas SNI/CDN) ; chaque connexion non vérifiée est notée dans `ssh.log`.
 
-Prérequis : JDK 17, Android SDK API 34, Gradle 8.x, curl, unzip, git et Go.
+## Diagnostics (dossier privé de l'app)
 
-## Import de profils
+`xray.json`, `xray-runtime.log`, `dnstt.log`, `hysteria.json`, `hysteria-runtime.log`, `hysteria-test-runtime.log`, `hev-runtime.log`, `tproxy.yml`, `known_hosts`, `ssh.log`.
 
-- VLESS, VMess, Trojan et Shadowsocks : liens de partage standards pris en charge par le parseur existant.
-- SOCKS : `socks://` ou `socks5://`.
-- WireGuard : fichier de configuration texte `[Interface]` / `[Peer]`, ou URI propre à TOM_TUNNEL `wireguard://PRIVATE_KEY@host:port?publicKey=...&address=...`.
-- UDP : `udp://PASSWORD@host:port?recv=2&sni=...&verify=0`.
+## Compilation automatique (GitHub Actions)
 
-## Sécurité et validation
+Le workflow `.github/workflows/build-apk.yml` compile l'APK à chaque push, pull request ou lancement manuel
+(onglet Actions → « Build TOM TUNNEL APK » → Run workflow). Il installe JDK 17, Go, le SDK Android 34 et Gradle 8.7,
+télécharge/compile les moteurs (mis en cache), puis publie `TomTunnel-<version>-debug.apk` dans les artefacts du run.
 
-- Les secrets WireGuard/Xray sont conservés dans le profil local et la configuration temporaire Xray est supprimée à l'arrêt du moteur.
-- La validation `xray run -test` est effectuée avant le démarrage.
-- Un test JSON réussi ne prouve pas qu'un serveur distant est compatible. Chaque protocole/transport doit être testé avec un serveur réel correspondant.
-- Le build Android n'a pas été exécuté dans l'environnement de préparation faute d'Android SDK/Gradle ; la validation finale doit être réalisée par Android Studio ou GitHub Actions.
-
-## Fichiers conservés volontairement
-
-`SshSocksEngine.kt` est la base partagée de SlowDNS et WebSocket ; `TProxyService.kt` est appelé par `TomVpnService`; `EngineManager.kt` distribue les profils ; `EngineAssets.kt` localise les exécutables natifs. Leur suppression casserait le fonctionnement du client.
-
-
-### Modes SSH
-Le formulaire SSH permet de choisir Direct, Direct + Payload, HTTP Proxy, HTTP Proxy + Payload, SSL/SNI, SSL/SNI + Payload, Slow DNS ou SSL/TLS Proxy + SNI + Payload. UDP se configure séparément. Les modes disponibles dépendent de la compatibilité du serveur distant.
-
-
-## Formulaire SSH (édition 1.5.3)
-
-Le formulaire Android propose un sélecteur unique avec les huit modes demandés : Direct, Direct + Payload, HTTP Proxy, HTTP Proxy + Payload, SSL / SNI, SSL / SNI + Payload, Slow DNS et SSL/TLS Proxy + SNI + Payload. Les champs Proxy, SNI et Payload sont affichés selon le mode. Slow DNS ouvre son formulaire dédié (NS, résolveur, clé publique DNSTT et identifiants SSH).
-
-Les modes TCP sont reliés au moteur `SshTcpEngine` : proxy HTTP CONNECT, TLS avec SNI et injection de payload sont appliqués dans l'ordre requis. La compatibilité dépend du serveur et du proxy distants.
-
-Le formulaire UDP conserve serveur, port/plage, mot de passe, Receive window, SNI et validation TLS. Le commutateur « Test Mode » visible dans l'application de référence n'est pas reproduit : son comportement serveur/client n'est pas défini par les éléments fournis et il ne faut pas afficher un réglage qui ne ferait rien.
-
-`app/src/main/assets/index.html` est l'unique interface HTML embarquée dans l'APK. L'ancien `index.html` racine, qui n'était référencé par aucun code Android ni workflow, a été retiré pour éviter toute confusion.
-
-
-## Test UDP réel (1.5.3)
-
-Le formulaire UDP inclut un test de connectivité qui lance temporairement Hysteria v1/ZiVPN, négocie SOCKS5 puis vérifie un CONNECT vers `1.1.1.1:443` à travers le tunnel. Le moteur temporaire est arrêté après le test. Le contrôle ne mesure pas le débit et nécessite un accès à la destination de test.
-
-
-## Identité visuelle TOM TUNNEL
-
-L'interface utilise désormais un thème sombre fixe : bleu nuit, bleu électrique et accents orange. Le sélecteur de thème a été retiré des paramètres pour conserver une apparence cohérente. Les fonctions et moteurs VPN n'ont pas été volontairement modifiés dans cette mise à jour graphique.
+- Le dépôt doit contenir ce dossier à sa racine (`settings.gradle.kts` à côté de `.github/`).
+- Un tag `v*` (ex. `v1.0.0`) publie aussi les APK dans une Release.
+- APK release signé (optionnel) : ajoute les secrets `KEYSTORE_BASE64` (keystore encodé en base64), `KEYSTORE_PASSWORD`,
+  `KEY_ALIAS` et `KEY_PASSWORD`. Sans eux, seul l'APK debug est produit.
