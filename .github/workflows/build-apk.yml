@@ -40,127 +40,21 @@ jobs:
           gradle-version: '8.7'
 
       # ============================================================
-      # Crée le script de bootstrap (version propre, sans indentation)
+      # Création propre du script via base64 (aucun problème de syntaxe)
       # ============================================================
       - name: Assurer la présence de scripts/bootstrap-engines.sh
         run: |
           mkdir -p scripts
-          cat > scripts/bootstrap-engines.sh << 'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          ROOT="\( (cd " \)(dirname "$0")/.." && pwd)"
-          LIBS="$ROOT/app/libs"
-          JNI="$ROOT/app/src/main/jniLibs"
-          TMP="${TMPDIR:-/tmp}/tomtunnel-engines"
-          mkdir -p "$LIBS" "$JNI/arm64-v8a" "$JNI/x86_64" "$TMP"
-          HEV=2.18.0
-          XRAY=26.9.8
-          DNSTT_REPO=https://github.com/dnstt-xyz/dnstt_xyz_app.git
-
-          need(){ command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1" >&2; exit 1; }; }
-          need curl; need unzip; need git; need go
-
-          if [ ! -s "$LIBS/hev-socks5-tunnel.aar" ]; then
-            curl -fL --retry 3 "https://github.com/heiher/hev-socks5-tunnel/releases/download/$HEV/hev-socks5-tunnel.aar" -o "$LIBS/hev-socks5-tunnel.aar"
-          fi
-          test -s "$LIBS/hev-socks5-tunnel.aar"
-
-          fetch_xray(){
-            local abi="$1" file="$2"
-            local zip="$TMP/$file.zip" out="$JNI/$abi/libxray.so"
-            if [ -s "$out" ]; then echo "Xray $abi déjà présent"; return; fi
-            curl -fL --retry 3 "https://github.com/XTLS/Xray-core/releases/download/v$XRAY/$file.zip" -o "$zip"
-            unzip -p "$zip" xray > "$out"
-            chmod 755 "$out"
-            test -s "$out"
-          }
-          fetch_xray arm64-v8a Xray-android-arm64-v8a
-          fetch_xray x86_64 Xray-android-amd64
-
-          SRC="$TMP/dnstt_xyz_app"
-          if [ ! -d "$SRC/.git" ]; then
-            git clone --depth 1 "$DNSTT_REPO" "$SRC"
-          else
-            git -C "$SRC" fetch --depth 1 origin >/dev/null 2>&1 || true
-            git -C "$SRC" reset --hard FETCH_HEAD >/dev/null 2>&1 || true
-          fi
-
-          CLIENT_DIR="$SRC/go_src/dnstt-client"
-          [ -d "$CLIENT_DIR" ] || { echo "ERREUR: dossier go_src/dnstt-client introuvable dans $SRC" >&2; exit 1; }
-
-          MOD_DIR="$CLIENT_DIR"
-          while [ "$MOD_DIR" != "$SRC" ] && [ "$MOD_DIR" != "/" ] && [ ! -f "$MOD_DIR/go.mod" ]; do
-            MOD_DIR="$(dirname "$MOD_DIR")"
-          done
-          if [ ! -f "$MOD_DIR/go.mod" ]; then
-            FOUND="$(find "$SRC" -name go.mod -not -path '*/node_modules/*' | head -n1)"
-            [ -n "$FOUND" ] || { echo "ERREUR: aucun go.mod trouvé dans $SRC" >&2; exit 1; }
-            MOD_DIR="$(dirname "$FOUND")"
-          fi
-          REL="${CLIENT_DIR#"\( MOD_DIR"}"; REL=" \){REL#/}"
-          PKG="./${REL}"; [ -n "$REL" ] || PKG="."
-          echo "Module Go : $MOD_DIR  (paquet $PKG)"
-
-          build_dnstt(){
-            local goarch="$1" abi="$2"
-            local out="$JNI/$abi/libdnstt.so"
-            if [ -s "$out" ]; then echo "DNSTT $abi déjà présent"; return; fi
-            local goos
-            for goos in android linux; do
-              if (cd "$MOD_DIR" && GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "$out.tmp" "$PKG"); then
-                echo "DNSTT $abi compilé (GOOS=$goos)"
-                mv "$out.tmp" "$out"
-                chmod 755 "$out"
-                test -s "$out"
-                return
-              fi
-              rm -f "$out.tmp"
-            done
-            echo "ERREUR: compilation DNSTT impossible pour $abi" >&2
-            exit 1
-          }
-          build_dnstt arm64 arm64-v8a
-          build_dnstt amd64 x86_64
-
-          HYST_TAG="${HYST_TAG:-v1.3.5}"
-          HYST_SRC="$TMP/hysteria-v1"
-          build_hysteria(){
-            local goarch="$1" abi="$2"
-            local out="$JNI/$abi/libhysteria.so"
-            if [ -s "$out" ]; then echo "Hysteria $abi déjà présent"; return; fi
-            if [ ! -d "$HYST_SRC/.git" ]; then
-              git clone --depth 1 --branch "$HYST_TAG" https://github.com/apernet/hysteria.git "$HYST_SRC"
-            fi
-            local goos
-            for goos in android linux; do
-              if (cd "$HYST_SRC" && GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "$out.tmp" ./cmd); then
-                echo "Hysteria $abi compilé (GOOS=$goos)"
-                mv "$out.tmp" "$out"
-                chmod 755 "$out"
-                test -s "$out"
-                return
-              fi
-              rm -f "$out.tmp"
-            done
-            echo "ERREUR: compilation Hysteria impossible pour $abi" >&2
-            exit 1
-          }
-          build_hysteria arm64 arm64-v8a
-          build_hysteria amd64 x86_64
-
-          rm -rf "$ROOT/app/src/main/assets/engines"
-
-          printf '\nEngine bootstrap complete.\n'
-          printf 'Native engines:\n'
-          find "$JNI" -maxdepth 2 -type f -printf '  %p (%s bytes)\n' | sort
-          printf 'AAR: %s\n' "$LIBS/hev-socks5-tunnel.aar"
-          EOF
-
-          # Nettoyage des espaces de début de ligne (problème classique YAML)
-          sed -i 's/^[[:space:]]*//' scripts/bootstrap-engines.sh
+          cat > scripts/bootstrap-engines.sh << 'B64'
+          IyEvdXNyL2Jpbi9lbnYgYmFzaApzZXQgLWV1byBwaXBlZmFpbApST09UPSIkKGNkICIkKGRpcm5hbWUgIiQwIikvLi4iICYmIHB3ZCkiCkxJQlM9IiRST09UL2FwcC9saWJzIgpKTkk9IiRST09UL2FwcC9zcmMvbWFpbi9qbmlMaWJzIgpUTVA9IiR7VE1QRElSOi0vdG1wfS90b210dW5uZWwtZW5naW5lcyIKbWtkaXIgLXAgIiRMSUJTIiAiJEpOSS9hcm02NC12OGEiICIkSk5JL3g4Nl82NCIgIiRUTVAiCkhFVj0yLjE4LjAKWFJBWT0yNi45LjgKRE5TVFRfUkVQTz1odHRwczovL2dpdGh1Yi5jb20vZG5zdHQteHl6L2Ruc3R0X3h5el9hcHAuZ2l0CgpuZWVkKCl7IGNvbW1hbmQgLXYgIiQxIiA+L2Rldi9udWxsIDI+JjEgfHwgeyBlY2hvICJNaXNzaW5nOiAkMSIgPiYyOyBleGl0IDE7IH07IH0KbmVlZCBjdXJsOyBuZWVkIHVuemlwOyBuZWVkIGdpdDsgbmVlZCBnbwoKaWYgWyAhIC1zICIkTElCUy9oZXYtc29ja3M1LXR1bm5lbC5hYXIiIF07IHRoZW4KICBjdXJsIC1mTCAtLXJldHJ5IDMgImh0dHBzOi8vZ2l0aHViLmNvbS9oZWloZXIvaGV2LXNvY2tzNS10dW5uZWwvcmVsZWFzZXMvZG93bmxvYWQvJEhFVi9oZXYtc29ja3M1LXR1bm5lbC5hYXIiIC1vICIkTElCUy9oZXYtc29ja3M1LXR1bm5lbC5hYXIiCmZpCnRlc3QgLXMgIiRMSUJTLzpldi1zb2NrczUtdHVubmVsLmFhciIKCmZldGNoX3hyYXkoKXsKICBsb2NhbCBhYmktIiQxIiBmaWxlPSIkMiIKICBsb2NhbCB6aXA9IiRUTVAvJGZpbGUuemlwIiBvdXQ9IiRKTkkvJGFiaS9saWJ4cmF5LnNvIgogIGlmIFsgLXMgIiRvdXQiIF07IHRoZW4gZWNobyAiWHJheSAkYWJpIGRlamEgIHByZXNlbnQiOyByZXR1cm47IGZpCiAgY3VybCAtZkkgLS1yZXRyeSAzICJodHRwczovL2dpdGh1Yi5jb20vWFRMUy9YcmF5LWNvcmUvcmVsZWFzZXMvZG93bmxvYWQvdlRYUkFZLyRmaWxlLnppcCIgLW8gIiR6aXAiCiAgdW56aXAgLXAgIiR6aXAiIHhyYXkgPiAiJG91dCIKICBjaG1vZCA3NTUgIiRvdXQiCiAgdGVzdCAtcyAiJG91dCIKfQpmZXRjaF94cmF5IGFybTY0LXY4YSBYcmF5LWFuZHJvaWQtYXJtNjQtdjhhCmZldGNoX3hyYXkgeDg2XzY0IFhyYXktYW5kcm9pZC1hbWQ2NAoKU1JDPSIkVE1QL2Ruc3R0X3h5el9hcHAiCmlmIFsgISAtZCAiJFNSQy8uZ2l0IiBdOyB0aGVuCiAgZ2l0IGNsb25lIC0tZGVwdGggMSAiJEROU1RUX1JFUE8iICIkU1JDIgpelseKICBnaXQgLUMgIiRTUkMiIGZldGNoIC0tZGVwdGggMSBvcmlnaW4gPi9kZXYvbnVsbCAyPiYxIHx8IHRydWUKICBnaXQgLUMgIiRTUkMiIHJlc2V0IC0taGFyZCBGRVRDSC9IRUFEID4vZGV2L251bGwgMj4mMSB8fCB0cnVlCmZpCgpDTElFTlRfRElSPSIkU1JDL2dvX3NyYy9kbnN0dC1jbGllbnQiClsgLWQgIiRDTElFTlRfRElSIiBdIHx8IHsgZWNobyAiRVJSRVVSOiBkb3NzaWVyIGdvX3NyYy9kbnN0dC1jbGllbnQgaW50cm91dmFibGUgZGFucyAkU1JDIiA+JjI7IGV4aXQgMTsgfQoKTU9EX0RJUj0iJENMSUVOVF9ESVIiCndoaWxlIFsgIiRNT0RfRElSIiAhPSAiJFNSQyIgXSAmJiBbICIkTU9EX0RJUiIgIT0gIi8iIF0gJiYgWyAhIC1mICIkTU9EX0RJUi9nby5tb2QiIF07IGRvCiAgTU9EX0RJUj0iJChkaXJuYW1lICIkTU9EX0RJUiIpIgpkb25lCmlmIFsgISAtZiAiJE1PRF9ESVIvZ28ubW9kIiBdOyB0aGVuCiAgRk9VTkQ9IiQoZmluZCAiJFNSQyIgLW5hbWUgZ28ubW9kIC1ub3QgcGF0aCAnKi9ub2RlX21vZHVsZXMvKicgfCBoZWFkIC1uMSkiCiAgWyAtbiAiJEZPVU5EIiBdIHx8IHsgZWNobyAiRVJSRVVSOiBhdWN1biBnby5tb2QgIHRyb3V2ZSBkYW5zICRTUkMiID4mMjsgZXhpdCAxOyB9CiAgTU9EX0RJUj0iJChkaXJuYW1lICIkRk9VTkQiKSIKZmkKUkVMPSIke0NMSUVOVF9ESVIjIiRNT0RfRElSfSI7IFJFTD0iJHtSRUwjL30iClBLRz0iLi8ke1JFTH0iOyBbIC1uICIkUkVMIiBdIHx8IFBLRz0iLiIKZWNobyAiTW9kdWxlIEdvIDogJE1PRF9ESVIgIChwYXF1ZXQgJFBLRykiCgpidWlsZF9kbnN0dCgpewogIGxvY2FsIGdvYXJjaD0iJDEiIGFiaT0iJDIiCiAgbG9jYWwgb3V0PSIkSk5JLyRhYmkvbGliZG5zdHQuc28iCiAgaWYgWyAtcyAiJG91dCIgXTsgdGhlbiBlY2hvICJETlNUVCAkYWJpIGRlamEgcHJlc2VudCI7IHJldHVybjsgZmkKICBsb2NhbCBnb29zCiAgZm9yIGdvb3MgaW4gYW5kcm9pZCBsaW51eDsgZG8KICAgIGlmIChjZCAiJE1PRF9ESVIiICYmIEdPT1M9IiRnb29zIiBHT0FSQ0g9IiRnb2FyY2giIENHT19FTkFCTEVEPTAgZ28gYnVpbGQgLXRyaW1wYXRoIC1sZGZsYWdzPSctcyAtdycgLW8gIiRvdXQudG1wIiAiJFBLRyIpOyB0aGVuCiAgICAgIGVjaG8gIkROU1RUICRhYmkgY29tcGlsZSAoR09PUz0kZ29vcykiCiAgICAgIG12ICIkb3V0LnRtcCIgIiRvdXQiCiAgICAgIGNobW9kIDc1NSAiJG91dCIKICAgICAgdGVzdCAtcyAiJG91dCIKICAgICAgcmV0dXJuCiAgICBmaQogICAgcm0gLWYgIiRvdXQudG1wIgogIGRvbmUKICBlY2hvICJFUlJFVVI6IGNvbXBpbGF0aW9uIEROU1RUIGltcG9zc2libGUgcG91ciAkYWJpIiA+JjIKICBleGl0IDEKfQpidWlsZF9kbnN0dCBhcm02NCBhcm02NC12OGEiCmJ1aWxkX2Ruc3R0IGFtZDY0IHg4Nl82NAoKSFlTVF9UQUc9IiR7SFlTVF9UQUc6LXYxLjMuNX0iCkhZU1RfU1JDPSIkVE1QL2h5c3RlcmlhLXYxIgpidWlsZF9oeXN0ZXJpYSgpewogIGxvY2FsIGdvYXJjaD0iJDEiIGFiaT0iJDIiCiAgbG9jYWwgb3V0PSIkSk5JLyRhYmkvbGliaHlzdGVyaWEuc28iCiAgaWYgWyAtcyAiJG91dCIgXTsgdGhlbiBlY2hvICJIeXN0ZXJpYSAkYWJpIGRlamEgcHJlc2VudCI7IHJldHVybjsgZmkKICBpZiBbICEgLWQgIiRIWVNUX1NSQy8uZ2l0IiBdOyB0aGVuCiAgICBnaXQgY2xvbmUgLS1kZXB0aCAxIC0tYnJhbmNoICIkSFlTVF9UQUciIGh0dHBzOi8vZ2l0aHViLmNvbS9hcGVybmV0L2h5c3RlcmlhLmdpdCAiJEhZU1RfU1JDIgogIGZpCiAgbG9jYWwgZ29vcwogIGZvciBnb29zIGluIGFuZHJvaWQgbGludXg7IGRvCiAgICBpZiAoY2QgIiRIWVNUX1NSQyIgJiYgR09PUz0iJGdvb3MiIEdPQVJDSD0iJGdvYXJjaCIgQ0dPX0VOQUJMRUQ9MCBnbyBidWlsZCAtdHJpbXBhdGggLWxkZmxhZ3M9Jy1zIC13JyAtbyAiJG91dC50bXAiIC4vY21kKTsgdGhlbgogICAgICBlY2hvICJIeXN0ZXJpYSAkYWJpIGNvbXBpbGUgKEdPT1M9JGdvb3MpIgogICAgICBtdiAiJG91dC50bXAiICIkb3V0IgogICAgICBjaG1vZCA3NTUgIiRvdXQiCiAgICAgIHRlc3QgLXMgIiRvdXQiCiAgICAgIHJldHVybgogICAgZmkKICAgIHJtIC1mICIkb3V0LnRtcCIKICBkb25lCiAgZWNobyAiRVJSRVVSOiBjb21waWxhdGlvbiBIeXN0ZXJpYSBpbXBvc3NpYmxlIHBvdXIgJGFiaSIgPiYyCiAgZXhpdCAxCn0KYnVpbGRfaHlzdGVyaWEgYXJtNjQgYXJtNjQtdjhhCmJ1aWxkX2h5c3RlcmlhIGFtZDY0IHg4Nl82NAoKcm0gLXJmICIkUk9PVC9hcHAvc3JjL21haW4vYXNzZXRzL2VuZ2luZXMiCgpwcmludGYgJ1xuRW5naW5lIGJvb3RzdHJhcCBjb21wbGV0ZS5c bicKcHJpbnRmICdOYXRpdmUgZW5naW5lczpcbicKZmluZCAiJEpOSSIgLW1heGRlcHRoIDIgLXR5cGUgZiAtcHJpbnRmICcgICVwICglcyBieXRlcylcbid8IHNvcnQKcHJpbnRmICdBQVI6ICVzXG4nICIkTElCUy9oZXYtc29ja3M1LXR1bm5lbC5hYXIiCg==
+          B64
+          # Décodage + nettoyage
+          base64 -d scripts/bootstrap-engines.sh > /tmp/bootstrap-engines.sh
+          mv /tmp/bootstrap-engines.sh scripts/bootstrap-engines.sh
           chmod +x scripts/bootstrap-engines.sh
-          head -n 5 scripts/bootstrap-engines.sh
-          echo "--- script OK ---"
+          echo "=== Vérification du script ==="
+          head -n 8 scripts/bootstrap-engines.sh
+          echo "=== Fin vérification ==="
 
       - name: Cache des moteurs natifs
         id: engines
@@ -175,7 +69,7 @@ jobs:
         if: steps.engines.outputs.cache-hit != 'true'
         run: |
           chmod +x scripts/bootstrap-engines.sh
-          ./scripts/bootstrap-engines.sh
+          bash scripts/bootstrap-engines.sh
 
       - name: Vérifier la présence des moteurs
         run: |
