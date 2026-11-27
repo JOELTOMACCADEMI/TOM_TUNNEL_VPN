@@ -18,7 +18,7 @@ class WebActivity : ComponentActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
-        val url = intent.getStringExtra("url") ?: "https://t.me/tomtunnel"
+        val url = intent.getStringExtra("url") ?: "about:blank"
         val title = TextView(this).apply { text = Uri.parse(url).host ?: ""; textSize = 15f; setPadding(24, 0, 0, 0) }
         val close = Button(this).apply { text = "✕"; setOnClickListener { finish() } }
         val bar = LinearLayout(this).apply {
