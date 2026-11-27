@@ -48,14 +48,11 @@ download() {
     --max-time 600 \
     "$url" -o "$output"
 
-  test -s "$output" || {
-    echo "ERROR: Empty download: $output" >&2
-    exit 1
-  }
+  test -s "$output"
 }
 
 # ==========================================
-# 0. ANDROID NDK
+# ANDROID NDK
 # ==========================================
 
 NDK="${ANDROID_NDK_HOME:-}"
@@ -66,24 +63,23 @@ fi
 
 TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-if [ ! -d "$TOOLCHAIN" ]; then
+test -d "$TOOLCHAIN" || {
   echo "ERROR: Android NDK not found: $NDK"
   exit 1
-fi
-
-export PATH="$TOOLCHAIN:$PATH"
+}
 
 echo "Android NDK: $NDK"
-echo "Go: $(go version)"
+echo "Default Go: $(go version)"
 
 # ==========================================
-# ANDROID TARGET COMPILER
+# COMMON ANDROID COMPILER
 # ==========================================
 
 android_build() {
   local arch="$1"
   local package="$2"
   local output="$3"
+  local go_bin="${4:-go}"
   local compiler
 
   case "$arch" in
@@ -94,36 +90,41 @@ android_build() {
       compiler="x86_64-linux-android${ANDROID_API}-clang"
       ;;
     *)
-      echo "ERROR: Unsupported Android architecture: $arch"
+      echo "ERROR: Unsupported architecture: $arch"
       return 1
       ;;
   esac
 
-  if [ ! -x "$TOOLCHAIN/$compiler" ]; then
-    echo "ERROR: Android compiler missing: $compiler"
+  test -x "$TOOLCHAIN/$compiler" || {
+    echo "ERROR: Missing compiler: $compiler"
     return 1
-  fi
+  }
 
-  echo "Android target: $arch"
-  echo "Compiler: $compiler"
+  rm -f "$output.tmp"
 
-  CGO_ENABLED=1 \
-  GOOS=android \
-  GOARCH="$arch" \
-  CC="$TOOLCHAIN/$compiler" \
-  go build \
-    -buildmode=pie \
-    -trimpath \
-    -ldflags="-s -w" \
-    -o "$output.tmp" \
-    "$package"
+  echo "Compiler: $("$go_bin" version)"
+  echo "Target: Android $arch"
+
+  (
+    export CGO_ENABLED=1
+    export GOOS=android
+    export GOARCH="$arch"
+    export CC="$TOOLCHAIN/$compiler"
+
+    "$go_bin" build \
+      -buildmode=pie \
+      -trimpath \
+      -ldflags="-s -w" \
+      -o "$output.tmp" \
+      "$package"
+  )
 
   test -s "$output.tmp"
 
   mv "$output.tmp" "$output"
   chmod 755 "$output"
 
-  echo "Android binary built: $output"
+  echo "Compiled: $output"
 }
 
 # ==========================================
@@ -138,10 +139,11 @@ if [ ! -s "$HEV_AAR" ]; then
 fi
 
 unzip -t "$HEV_AAR" >/dev/null
+
 echo "HEV AAR verified."
 
 # ==========================================
-# 2. XRAY ANDROID RELEASE
+# 2. XRAY
 # ==========================================
 
 XRAY_API="https://api.github.com/repos/XTLS/Xray-core/releases/tags/v${XRAY}"
@@ -164,7 +166,6 @@ fetch_xray() {
 
   if [ -z "$url" ] || [ "$url" = "null" ]; then
     echo "ERROR: Xray asset missing: $asset.zip"
-    jq -r '.assets[].name' "$XRAY_JSON"
     exit 1
   fi
 
@@ -190,17 +191,14 @@ SRC="$TMP/dnstt_xyz_app"
 
 rm -rf "$SRC"
 
-git clone \
-  --depth 1 \
-  "$DNSTT_REPO" \
-  "$SRC"
+git clone --depth 1 "$DNSTT_REPO" "$SRC"
 
 CLIENT_DIR="$SRC/go_src/dnstt-client"
 
-if [ ! -d "$CLIENT_DIR" ]; then
-  echo "ERROR: DNSTT client directory not found."
+test -d "$CLIENT_DIR" || {
+  echo "ERROR: DNSTT client directory missing."
   exit 1
-fi
+}
 
 MOD_DIR="$CLIENT_DIR"
 
@@ -211,7 +209,7 @@ while [ "$MOD_DIR" != "$SRC" ] &&
 done
 
 if [ ! -f "$MOD_DIR/go.mod" ]; then
-  echo "ERROR: DNSTT go.mod not found."
+  echo "ERROR: DNSTT go.mod missing."
   exit 1
 fi
 
@@ -231,11 +229,11 @@ build_dnstt() {
 
   rm -f "$output"
 
-  echo "Building DNSTT Android: $abi"
+  echo "Building DNSTT: $abi"
 
   (
     cd "$MOD_DIR"
-    android_build "$arch" "$PKG" "$output"
+    android_build "$arch" "$PKG" "$output" go
   )
 }
 
@@ -243,10 +241,26 @@ build_dnstt arm64 arm64-v8a
 build_dnstt amd64 x86_64
 
 # ==========================================
-# 4. HYSTERIA V1
+# 4. HYSTERIA V1 - GO 1.20.14
 # ==========================================
 
 HYST_SRC="$TMP/hysteria-v1"
+HYST_APP="$HYST_SRC/app"
+HYST_GO="${HYST_GO:-}"
+
+if [ -z "$HYST_GO" ] || [ ! -x "$HYST_GO" ]; then
+  echo "ERROR: HYST_GO must point to Go 1.20.14."
+  exit 1
+fi
+
+HYST_GO_VERSION="$("$HYST_GO" version)"
+
+echo "Hysteria Go: $HYST_GO_VERSION"
+
+if [[ "$HYST_GO_VERSION" != *"go1.20.14"* ]]; then
+  echo "ERROR: Hysteria requires Go 1.20.14."
+  exit 1
+fi
 
 rm -rf "$HYST_SRC"
 
@@ -256,21 +270,17 @@ git clone \
   https://github.com/apernet/hysteria.git \
   "$HYST_SRC"
 
-HYST_APP="$HYST_SRC/app"
-HYST_CMD="$HYST_APP/cmd"
-
-if [ ! -f "$HYST_APP/go.mod" ]; then
+test -f "$HYST_APP/go.mod" || {
   echo "ERROR: Hysteria app/go.mod missing."
   exit 1
-fi
+}
 
-if [ ! -f "$HYST_CMD/main.go" ]; then
+test -f "$HYST_APP/cmd/main.go" || {
   echo "ERROR: Hysteria app/cmd/main.go missing."
   exit 1
-fi
+}
 
 echo "Hysteria module: $HYST_APP"
-echo "Hysteria entry: ./cmd"
 
 build_hysteria() {
   local arch="$1"
@@ -279,53 +289,57 @@ build_hysteria() {
 
   rm -f "$output"
 
-  echo "Building Hysteria Android: $abi"
+  echo "Building Hysteria: $abi"
 
   (
     cd "$HYST_APP"
-    android_build "$arch" "./cmd" "$output"
+    android_build "$arch" "./cmd" "$output" "$HYST_GO"
   )
+
+  echo "Hysteria compiled: $abi"
 }
 
 build_hysteria arm64 arm64-v8a
 build_hysteria amd64 x86_64
 
 # ==========================================
-# 5. ELF ARCHITECTURE VALIDATION
+# 5. VALIDATE ELF ARCHITECTURES
 # ==========================================
 
 validate_elf() {
-  local file_path="$1"
+  local path="$1"
   local expected="$2"
   local actual
 
-  test -s "$file_path" || {
-    echo "ERROR: Missing binary: $file_path"
+  test -s "$path" || {
+    echo "ERROR: Missing binary: $path"
     exit 1
   }
 
-  actual="$(readelf -h "$file_path" |
-    awk -F: '/Machine:/ {gsub(/^[ \t]+/, "", $2); print $2}')"
+  actual="$(readelf -h "$path" |
+    awk -F: '/Machine:/ {
+      gsub(/^[ \t]+/, "", $2);
+      print $2
+    }')"
 
-  echo "Checking: $file_path"
-  echo "Architecture: $actual"
+  echo "$path : $actual"
 
   case "$expected" in
     arm64)
       [[ "$actual" == *AArch64* ]] || {
-        echo "ERROR: Wrong ARM64 architecture: $actual"
+        echo "ERROR: Incorrect ARM64 architecture."
         exit 1
       }
       ;;
     amd64)
       [[ "$actual" == *X86-64* ]] || {
-        echo "ERROR: Wrong x86_64 architecture: $actual"
+        echo "ERROR: Incorrect x86_64 architecture."
         exit 1
       }
       ;;
   esac
 
-  file "$file_path"
+  file "$path"
 }
 
 for ENGINE in xray dnstt hysteria; do
@@ -341,13 +355,13 @@ unzip -t "$HEV_AAR" >/dev/null
 
 echo
 echo "=========================================="
-echo " TOM TUNNEL ANDROID ENGINES READY"
+echo " TOM TUNNEL NATIVE ENGINES READY"
 echo "=========================================="
 
 find "$JNI" -maxdepth 2 -type f -print
 
 echo "HEV: $HEV"
 echo "XRAY: $XRAY"
-echo "DNSTT: Android ARM64 + x86_64"
-echo "HYSTERIA: $HYST_TAG"
+echo "DNSTT: Go 1.24"
+echo "HYSTERIA: $HYST_TAG / Go 1.20.14"
 echo "=========================================="
