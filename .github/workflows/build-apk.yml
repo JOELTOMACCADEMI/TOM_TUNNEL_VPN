@@ -139,6 +139,24 @@ jobs:
           test -s app/libs/hev-socks5-tunnel.aar
           unzip -t app/libs/hev-socks5-tunnel.aar >/dev/null
 
+      # AndroidX est obligatoire pour les dépendances AndroidX utilisées par l'application.
+      - name: Enable AndroidX
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          touch gradle.properties
+          if grep -qE '^android\.useAndroidX=' gradle.properties; then
+            sed -i 's/^android\.useAndroidX=.*/android.useAndroidX=true/' gradle.properties
+          else
+            printf '\nandroid.useAndroidX=true\n' >> gradle.properties
+          fi
+          # Aide les anciennes bibliothèques encore basées sur l'ancien support library.
+          if ! grep -qE '^android\.enableJetifier=' gradle.properties; then
+            printf 'android.enableJetifier=true\n' >> gradle.properties
+          fi
+          echo "AndroidX configuration:"
+          grep -E '^android\.(useAndroidX|enableJetifier)=' gradle.properties
+
       - name: Compile TOM TUNNEL debug APK
         shell: bash
         run: |
