@@ -11,7 +11,6 @@ on:
 permissions:
   contents: write
 
-# Évite que deux compilations du même commit se perturbent.
 concurrency:
   group: tom-tunnel-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -39,7 +38,6 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # Go récent pour compiler DNSTT.
       - name: Set up Go 1.24
         uses: actions/setup-go@v5
         with:
@@ -62,7 +60,6 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
           test -d "$ANDROID_HOME/ndk/27.2.12479018"
 
-      # Hysteria v1.3.5 requiert Go 1.20.14 selon le script du dépôt.
       - name: Install Go 1.20.14 for Hysteria
         shell: bash
         run: |
@@ -77,8 +74,6 @@ jobs:
           "$GO_DIR/bin/go" version
           echo "HYST_GO=$GO_DIR/bin/go" >> "$GITHUB_ENV"
 
-      # Le cache Gradle est désactivé pour éviter les erreurs de réservation
-      # de cache observées dans les exécutions précédentes.
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -117,8 +112,11 @@ jobs:
           mkdir -p app/src/main/jniLibs/x86_64
           chmod +x script/bootstrap-engines.sh
 
+      # GITHUB_TOKEN réduit les refus 403 dus aux limites de l'API GitHub.
       - name: Build Xray, DNSTT, Hysteria and HEV engines
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
           bash script/bootstrap-engines.sh
@@ -139,7 +137,6 @@ jobs:
           test -s app/libs/hev-socks5-tunnel.aar
           unzip -t app/libs/hev-socks5-tunnel.aar >/dev/null
 
-      # AndroidX est obligatoire pour les dépendances AndroidX utilisées par l'application.
       - name: Enable AndroidX
         shell: bash
         run: |
@@ -150,11 +147,9 @@ jobs:
           else
             printf '\nandroid.useAndroidX=true\n' >> gradle.properties
           fi
-          # Aide les anciennes bibliothèques encore basées sur l'ancien support library.
           if ! grep -qE '^android\.enableJetifier=' gradle.properties; then
             printf 'android.enableJetifier=true\n' >> gradle.properties
           fi
-          echo "AndroidX configuration:"
           grep -E '^android\.(useAndroidX|enableJetifier)=' gradle.properties
 
       - name: Compile TOM TUNNEL debug APK
@@ -178,7 +173,8 @@ jobs:
           test -s "$APK"
           unzip -t "$APK" >/dev/null
           mkdir -p release
-          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" > release/apk-badging.txt
+          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" \
+            > release/apk-badging.txt
           sed -n '1,12p' release/apk-badging.txt
           cp "$APK" "release/TOM-TUNNEL-${GITHUB_SHA::7}-debug.apk"
           sha256sum release/*.apk > release/SHA256SUMS.txt
@@ -199,7 +195,6 @@ jobs:
           files: release/*
           generate_release_notes: true
 
-      # Ces journaux restent disponibles même si la compilation échoue.
       - name: Upload Gradle diagnostic reports
         if: failure()
         uses: actions/upload-artifact@v4
